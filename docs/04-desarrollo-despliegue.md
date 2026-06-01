@@ -1,5 +1,23 @@
 # Desarrollo y Despliegue
 
+## Convención técnica base
+
+El proyecto asume que todo el backend está construido sobre `FastAPI`.
+
+Esta es la decisión oficial de implementación del repositorio, incluso si documentos previos de diseño mencionan `Flask`.
+
+Esto permite:
+
+- un solo punto de entrada para toda la aplicación,
+- integración simple de módulos mediante routers,
+- y arranque estándar con `Uvicorn`.
+
+La convención operativa del proyecto es:
+
+- `app/main.py` expone la instancia principal `app`.
+- cada módulo define sus endpoints con `APIRouter`.
+- `app/main.py` integra los módulos usando `include_router(...)`.
+
 ## Uvicorn y ejecución de la app
 
 La aplicación usa FastAPI y se ejecuta con Uvicorn.
@@ -30,6 +48,8 @@ Ejemplos esperados:
 
 ```ini
 DATABASE_URL=postgresql://user:pass@postgres:5432/sdn_core
+FREERADIUS_HOST=10.0.0.20
+FREERADIUS_SECRET=change_me
 ONOS_URL=http://onos-cluster-vip:8181/onos/v1
 ONOS_USER=onos
 ONOS_PASSWORD=rocks
@@ -59,7 +79,16 @@ Esto implica que:
 
 - no se debe guardar estado crítico solo en memoria,
 - las sesiones y decisiones persistentes deben quedar en PostgreSQL,
-- y DHCP sigue siendo un servicio aparte.
+- DHCP sigue siendo un servicio aparte,
+- y la instalación real de flows sigue dependiendo de ONOS, no de M6 directamente.
+
+## Notas operativas del diseño actual
+
+- `M1` se integra con `FreeRADIUS`, pero la fuente de credenciales y roles sigue siendo `PostgreSQL`.
+- Los visitantes también pasan por el portal cautivo y se clasifican ahí mismo.
+- `M2` debe cargar reglas proactivas `T2` al inicio del sistema.
+- `M6` normalmente instala o elimina reglas, pero puede consultar el estado de ONOS para reconciliación.
+- `M5` no tendrá un backend adicional: se implementa sobre `PostgreSQL`.
 
 ## Recomendaciones para el equipo
 

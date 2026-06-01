@@ -50,7 +50,9 @@ Aquí vive la lógica separada por módulo funcional.
 
 - `m1_auth`: autenticación.
 - `m2_policies`: políticas.
-- `m6_translator`: integración con ONOS.
+- `m6_translator`: traducción de reglas y comunicación con ONOS.
+
+Esta organización asume una implementación en `FastAPI`, aunque el documento académico original haya descrito una versión conceptual en `Flask`.
 
 Cada módulo debe mantener, al menos:
 
@@ -86,6 +88,8 @@ Scripts operativos, por ejemplo arranque del servicio.
 ### `sql/`
 
 Scripts SQL versionados, incluyendo el esquema inicial de la base de datos.
+
+La base de datos PostgreSQL cubre tanto la parte operativa del core como la persistencia asociada a `M5`.
 
 ## Regla de mantenimiento
 
