@@ -1,0 +1,11 @@
+version: "3.8"
+services:
+  opa:
+    image: openpolicyagent/opa:0.68.0
+    container_name: m2-opa
+    ports:
+      - "8181:8181"
+    volumes:
+      - ./:/workspace
+    command: run --server /workspace/policy.rego /workspace/data.json
+    restart: unless-stopped

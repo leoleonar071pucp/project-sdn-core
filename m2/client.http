@@ -1,0 +1,196 @@
+# 1. Evaluación completa - Estudiante de Teleco (sin excepciones)
+POST http://localhost:8181/v1/data/policy/result
+content-type: application/json
+
+{
+    "input":{
+        "usuario":"20221203",
+        "roles":["estudiante_teleco"]
+    }
+}
+
+# Respuesta esperada: permisos sobre cursos_teleco_http, cursos_teleco_https
+# No tendrá acceso a otras facultades ni a servidor_notas ni panel_admin.
+
+
+###
+# 2. Evaluación completa - Estudiante de Info con excepción de acceso a Notas
+POST http://localhost:8181/v1/data/policy/result
+content-type: application/json
+
+{
+    "input":{
+        "usuario":"20261234",
+        "roles":["estudiante_info"]
+    }
+}
+
+# Respuesta esperada:
+# - cursos_info_http, cursos_info_https (por rol)
+# - servidor_notas_http con tabla T3, ancho_banda=30Mbps, expires_at=2026-06-30T23:59:59Z
+# - No debe aparecer servidor_notas_https ni panel_admin.
+
+
+####
+# 3. Evaluación completa - Docente con excepción denegatoria sobre Notas
+POST http://localhost:8181/v1/data/policy/result
+content-type: application/json
+
+{
+    "input":{
+        "usuario":"prof_lopez",
+        "roles":["docente"]
+    }
+}
+
+# Respuesta esperada:
+# Aparecen todos los cursos (Teleco, Info, Electro),
+# pero servidor_notas_http no, mientras que servidor_notas_https sí, por exceciones
+
+####
+# 4. Evaluación completa - Admin TI con denegación al panel
+POST http://localhost:8181/v1/data/policy/result
+content-type: application/json
+
+{
+    "input":{
+        "usuario":"admin_jefe",
+        "roles":["admin_ti"]
+    }
+}
+
+# Respuesta esperada:
+# Todos los recursos excepto panel_admin_http (denegado por excepción) y panel_admin_https (sí permitido porque no tiene excepción).
+# Con esto se ve que un admin puede tener un recurso puntual denegado.
+
+
+####
+# 5. Evaluación completa - Usuario multirrol
+POST http://localhost:8181/v1/data/policy/result
+content-type: application/json
+
+{
+    "input":{
+        "usuario":"multi_rol",
+        "roles":["estudiante_teleco", "docente"]
+    }
+}
+
+# Respuesta esperada:
+# - cursos_teleco_* (por ambos roles), cursos_info_*, cursos_electro_* (por docente)
+# - servidor_notas_http (por docente, sin excepción, aparecerá en T2)
+# - servidor_notas_https NO aparece (excepción allow:false) por deny explícito, aunque el rol docente normalmente lo permitiría.
+
+
+####
+# 6. Evaluación completa - Visitante con excepción de acceso especial
+POST http://localhost:8181/v1/data/policy/result
+content-type: application/json
+
+{
+    "input":{
+        "usuario":"visitante_ext",
+        "roles":["visitante"]
+    }
+}
+
+# El rol visitante no está en ninguna condición general de recursos.
+# Pero la excepción con allow:true sobre cursos_teleco_http le dará un permiso T3 con expiración.
+# Respuesta esperada: solo el permiso para cursos_teleco_http con tabla T3 y expires_at=2026-06-05T12:00:00Z.
+
+
+####
+# 7. Consulta individual - Recurso permitido por política general
+POST http://localhost:8181/v1/data/policy/allow_resource
+content-type: application/json
+
+{
+    "input":{
+        "usuario":"20221203",
+        "roles":["estudiante_teleco"],
+        "recurso":"cursos_teleco_https"
+    }
+}
+
+# Respuesta esperada: permitido por política general
+
+
+####
+# 8. Consulta individual - Recurso denegado por política general
+POST http://localhost:8181/v1/data/policy/allow_resource
+content-type: application/json
+
+{
+    "input":{
+        "usuario":"20221203",
+        "roles":["estudiante_teleco"],
+        "recurso":"servidor_notas_http"
+    }
+}
+
+# Respuesta esperada: denegado por política general
+
+
+####
+# 9. Consulta individual - Recurso permitido por excepción (estudiante_info → notas)
+POST http://localhost:8181/v1/data/policy/allow_resource
+content-type: application/json
+
+{
+    "input":{
+        "usuario":"20261234",
+        "roles":["estudiante_info"],
+        "recurso":"servidor_notas_http"
+    }
+}
+
+# Respuesta esperada: permitido por excepción
+
+
+
+####
+# 10. Consulta individual - Recurso denegado por excepción (docente → notas)
+POST http://localhost:8181/v1/data/policy/allow_resource
+content-type: application/json
+
+{
+    "input":{
+        "usuario":"prof_lopez",
+        "roles":["docente"],
+        "recurso":"servidor_notas_http"
+    }
+}
+
+# Respuesta esperada: {"allow":false, "acciones":["read","write"], ... , "razon":"excepcion"}
+
+
+####
+# 12. Consulta multirrol específica: multi_rol a servidor_notas_https
+POST http://localhost:8181/v1/data/policy/allow_resource
+content-type: application/json
+
+{
+    "input":{
+        "usuario":"multi_rol",
+        "roles":["estudiante_teleco", "docente"],
+        "recurso":"servidor_notas_https"
+    }
+}
+
+# Respuesta esperada: denegado por excepción, aunque el rol docente normalmente lo permitiría, la excepción de deny explícito prevalece.
+
+
+####
+# 13. Visitante a recurso no exceptuado -> denegado
+POST http://localhost:8181/v1/data/policy/allow_resource
+content-type: application/json
+
+{
+    "input":{
+        "usuario":"visitante_ext",
+        "roles":["visitante"],
+        "recurso":"cursos_info_http"
+    }
+}
+
+# Respuesta esperada: {"allow":false, "razon":"denegado_por_politica"}
