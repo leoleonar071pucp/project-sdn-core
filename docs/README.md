@@ -9,3 +9,4 @@ Esta carpeta contiene la documentación base para que el equipo entienda el cont
 - [02-modulos-core.md](C:\SDN-project\sdn-core\docs\02-modulos-core.md): responsabilidades de M1, M2 y M6.
 - [03-estructura-repo.md](C:\SDN-project\sdn-core\docs\03-estructura-repo.md): estructura del repositorio y criterio de organización.
 - [04-desarrollo-despliegue.md](C:\SDN-project\sdn-core\docs\04-desarrollo-despliegue.md): ejecución local, Docker, Uvicorn y escalabilidad.
+- [05-enfoque-controlador-onos.md](C:\SDN-project\sdn-core\docs\05-enfoque-controlador-onos.md): enfoque híbrido y uso de Packet-In, Packet-Out y REST API con ONOS.
