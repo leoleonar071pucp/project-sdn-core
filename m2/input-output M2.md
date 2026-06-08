@@ -40,25 +40,28 @@ Expone dos endpoints principales:
 
 ### Salida (Output)
 
+Nota: OPA envuelve la respuesta de sus reglas dentro de la clave `result`.
 
 ```json
 {
-    "usuario": "string",
-    "roles": ["string"],
-    "permisos": [
-        {
-            "recurso": {
-                "id": 1,
-                "nombre": "cursos_teleco_http",
-                "ip_dst": "10.0.0.21",
-                "puerto": 80,
-                "protocolo": "tcp"
-            },
-            "tabla": "T2",           // T2 = política general, T3 = excepción
-            "ancho_banda": "50Mbps",
-            "expires_at": null       // ISO 8601 o null
-        }
-    ]
+    "result": {
+        "usuario": "string",
+        "roles": ["string"],
+        "permisos": [
+            {
+                "recurso": {
+                    "id": 1,
+                    "nombre": "cursos_teleco_http",
+                    "ip_dst": "10.0.0.21",
+                    "puerto": 80,
+                    "protocolo": "tcp"
+                },
+                "tabla": "T2",           // T2 = política general, T3 = excepción
+                "ancho_banda": "50Mbps",
+                "expires_at": null       // ISO 8601 o null
+            }
+        ]
+    }
 }
 ```
 
@@ -90,13 +93,27 @@ Expone dos endpoints principales:
 
 ### Salida (Output)
 
+Nota: OPA envuelve la respuesta dentro de la clave `result`. Dependiendo de si se permite o deniega, los campos cambian.
 
+**Caso Permitido:**
 ```json
 {
-    "allow": true,
-    "ancho_banda": "50Mbps",
-    "expires_at": null,
-    "razon": "condiciones_generales"
+    "result": {
+        "allow": true,
+        "ancho_banda": "50Mbps",
+        "expires_at": null,
+        "razon": "condiciones_generales" // o "excepcion"
+    }
+}
+```
+
+**Caso Denegado:**
+```json
+{
+    "result": {
+        "allow": false,
+        "razon": "denegado_por_politica"
+    }
 }
 ```
 
@@ -133,7 +150,23 @@ Expone dos endpoints principales:
 
 ## Consideraciones
 
-- El `input` debe ir siempre envuelto en `{"input": {...}}`.
-- Los roles deben coincidir exactamente (caso sensible).
-- Para añadir o modificar excepciones, editar el objeto `excepciones_por_usuario` en `data.json` y recargar OPA.
-- El módulo evalúa la fecha de expiración internamente; el cliente no necesita validarla.
+- El `input` en la petición siempre debe ir envuelto en el objeto `{"input": {...}}`.
+- La respuesta de OPA siempre viene envuelta en un objeto `{"result": {...}}`.
+- Los roles deben coincidir exactamente (es sensible a mayúsculas/minúsculas).
+- El módulo evalúa la fecha de expiración de las excepciones internamente; el cliente no necesita validarla.
+
+---
+
+## ¿Cómo funciona para el equipo de desarrolladores?
+
+Para el equipo de desarrollo, la arquitectura se compone de 3 piezas principales levantadas por el `docker-compose`:
+
+1. **Base de Datos (db):** Una base de datos MySQL (m2-db) que contiene toda la información real de recursos, políticas y excepciones de los usuarios. Aquí es donde la aplicación debe hacer los cambios persistentes.
+2. **Agente OPA (opa):** Es el motor de políticas (m2-opa) que se expone en el puerto `8181`. OPA evalúa los permisos **completamente en memoria**, por lo que es extremadamente rápido. Al reiniciar el contenedor, OPA arranca vacío (solo con su archivo `policy.rego`).
+3. **Servicio Sincronizador (sync):** Es un contenedor (m2-sync) que actúa como puente. Se conecta a la base de datos de MySQL y **carga periódicamente** (mediante polling) los recursos y excepciones hacia OPA usando su API de datos. 
+
+**Flujo de trabajo del desarrollador:**
+- **No se insertan datos directamente a OPA.** Cualquier cambio en los recursos o en las excepciones de un usuario debe hacerse en la base de datos MySQL.
+- Una vez hecho el cambio en base de datos, el servicio `sync` lo detectará en su siguiente intervalo de sincronización (por ejemplo, cada 30 segundos para excepciones y 300 segundos para recursos, según las variables de entorno) y lo empujará a la memoria de OPA.
+- A partir de ese momento, los endpoints de políticas de OPA evaluarán correctamente las reglas con la información actualizada.
+- Esto permite mantener consultas de autorización de latencia muy baja sin golpear la base de datos en cada petición, ideal para arquitecturas de alta concurrencia.

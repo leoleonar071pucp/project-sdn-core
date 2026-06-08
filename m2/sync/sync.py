@@ -110,7 +110,6 @@ def fetch_exceptions():
         cursor = conn.cursor(pymysql.cursors.DictCursor)
         cursor.execute("""
             SELECT
-                pt.id_usuario,
                 u.codigo_pucp AS usuario,
                 pt.id_recurso,
                 r.nombre_recurso AS recurso,
@@ -119,27 +118,31 @@ def fetch_exceptions():
                 pt.ancho_banda,
                 pt.expiration
             FROM politicas_temporales pt
-            JOIN usuarios u
-                ON pt.id_usuario = u.id_usuario
-            JOIN recursos r
-                ON pt.id_recurso = r.id_recurso
+            JOIN usuarios u ON pt.id_usuario = u.id_usuario
+            JOIN recursos r ON pt.id_recurso = r.id_recurso
             WHERE pt.activo = 1
-                AND (pt.expiration IS NULL OR pt.expiration > NOW())
+              AND (pt.expiration IS NULL OR pt.expiration > NOW())
         """)
         rows = cursor.fetchall()
-        excepciones = []
+
+        excepciones_por_usuario = {}
         for row in rows:
-            exp = row["expiration"].strftime("%Y-%m-%dT%H:%M:%SZ") if row["expiration"] else None
-            excepciones.append({
-                "usuario": row["usuario"],
-                "recurso_id": row["id_recurso"],
+            usuario = row["usuario"]
+            ex_entry = {
+                "recurso_id": str(row["id_recurso"]),
                 "recurso": row["recurso"],
-                "allow": row["allow"],
-                "razon": row["razon"],
-                "ancho_banda": row["ancho_banda"],
-                "expires_at": exp
-            })
-        return excepciones
+                "allow": bool(row["allow"])
+            }
+            if row["razon"]:
+                ex_entry["razon"] = row["razon"]
+            if row["ancho_banda"]:
+                ex_entry["ancho_banda"] = row["ancho_banda"]
+            if row["expiration"]:
+                ex_entry["expires_at"] = row["expiration"].strftime("%Y-%m-%dT%H:%M:%SZ")
+            
+            excepciones_por_usuario.setdefault(usuario, []).append(ex_entry)
+
+        return excepciones_por_usuario
     finally:
         conn.close()
 
