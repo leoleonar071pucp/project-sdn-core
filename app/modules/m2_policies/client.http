@@ -1,0 +1,244 @@
+### 1. Estudiante Teleco (sin excepciones)
+POST http://localhost:8181/v1/data/policy/result
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "20221203",
+        "roles": ["estudiante_teleco"]
+    }
+}
+
+### 2. Estudiante Info con excepción en notas (allow true, ancho_banda 30Mbps, expira)
+POST http://localhost:8181/v1/data/policy/result
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "20261234",
+        "roles": ["estudiante_info"]
+    }
+}
+
+### 3. Docente con excepción denegatoria en servidor_notas_http (allow false)
+POST http://localhost:8181/v1/data/policy/result
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "prof_lopez",
+        "roles": ["docente"]
+    }
+}
+
+### 4. Admin TI con denegación al panel_admin_http (allow false)
+POST http://localhost:8181/v1/data/policy/result
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "admin_jefe",
+        "roles": ["admin_ti"]
+    }
+}
+
+### 5. Usuario multi_rol (estudiante_teleco + docente) – debe tener servidor_notas_https denegado por excepción
+POST http://localhost:8181/v1/data/policy/result
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "multi_rol",
+        "roles": ["estudiante_teleco", "docente"]
+    }
+}
+
+### 6. Visitante con excepción de acceso a cursos_teleco_http (T3, expira 2026-06-05)
+POST http://localhost:8181/v1/data/policy/result
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "visitante_ext",
+        "roles": ["visitante"]
+    }
+}
+
+### 7. Estudiante Teleco con facultad (recurso servidor_investigacion requiere facultad=Teleco)
+POST http://localhost:8181/v1/data/policy/result
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "20221203",
+        "roles": ["estudiante_teleco", "docente"],
+        "facultad": "Teleco"
+    }
+}
+# Esperado: servidor_investigacion aparece (rol docente + facultad Teleco)
+
+### 8. Estudiante Info sin facultad – servidor_investigacion NO debe aparecer
+POST http://localhost:8181/v1/data/policy/result
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "20261234",
+        "roles": ["estudiante_info"],
+        "facultad": null
+    }
+}
+# No debe tener servidor_investigacion
+
+### ============================================
+### CONSULTAS INDIVIDUALES POR ID DE RECURSO (allow_resource)
+### ============================================
+
+### 9. Recurso permitido por política general (id 2, cursos_teleco_https, estudiante Teleco)
+POST http://localhost:8181/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "20221203",
+        "roles": ["estudiante_teleco"],
+        "recurso_id": 2
+    }
+}
+# Esperado: allow true, razon "condiciones_generales"
+
+### 10. Recurso denegado por política general (id 7, servidor_notas_http, estudiante Teleco)
+POST http://localhost:8181/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "20221203",
+        "roles": ["estudiante_teleco"],
+        "recurso_id": 7
+    }
+}
+# Esperado: allow false, razon "denegado_por_politica"
+
+### 11. Recurso permitido por excepción (id 7, servidor_notas_http, estudiante_info con excepción)
+POST http://localhost:8181/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "20261234",
+        "roles": ["estudiante_info"],
+        "recurso_id": 7
+    }
+}
+# Esperado: allow true, ancho_banda "30Mbps", expires_at "2026-06-30T23:59:59Z"
+
+### 12. Recurso denegado por excepción (id 7, servidor_notas_http, prof_lopez)
+POST http://localhost:8181/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "prof_lopez",
+        "roles": ["docente"],
+        "recurso_id": 7
+    }
+}
+# Esperado: allow false, razon "excepcion"
+
+### 13. Recurso denegado por excepción (id 8, servidor_notas_https, multi_rol – excepción allow false)
+POST http://localhost:8181/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "multi_rol",
+        "roles": ["estudiante_teleco", "docente"],
+        "recurso_id": 8
+    }
+}
+# Esperado: allow false, razon "excepcion"
+
+### 14. Recurso permitido por política general a pesar de excepción (id 9, panel_admin_http, admin_jefe tiene excepción denegatoria)
+POST http://localhost:8181/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "admin_jefe",
+        "roles": ["admin_ti"],
+        "recurso_id": 9
+    }
+}
+# Esperado: allow false, razon "excepcion" (la excepción prevalece)
+
+### 15. Recurso sin excepción y permitido (id 10, panel_admin_https, admin_jefe)
+POST http://localhost:8181/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "admin_jefe",
+        "roles": ["admin_ti"],
+        "recurso_id": 10
+    }
+}
+# Esperado: allow true (no excepción para este recurso)
+
+### 16. Recurso condicional con facultad (id 15, servidor_investigacion, docente con facultad correcta)
+POST http://localhost:8181/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "prof_lopez",
+        "roles": ["docente"],
+        "facultad": "Teleco",
+        "recurso_id": 15
+    }
+}
+# Esperado: allow true (cumple rol docente y facultad Teleco)
+
+### 17. Recurso condicional con facultad pero rol incorrecto (estudiante info, facultad Teleco)
+POST http://localhost:8181/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "20261234",
+        "roles": ["estudiante_info"],
+        "facultad": "Teleco",
+        "recurso_id": 15
+    }
+}
+# Esperado: allow false (no cumple rol docente)
+
+### 18. Recurso con excepción que expiró (simular fecha actual > expires_at – manualmente cambiar fecha en data.json si se desea probar)
+# No se puede probar con solo el input; el Rego no valida expiración automáticamente a menos que añadas lógica de tiempo.
+# Por ahora la excepción sigue activa si no hay verificación de expiración.
+
+### 19. Visitante a recurso sin excepción (id 3, cursos_info_http)
+POST http://localhost:8181/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "visitante_ext",
+        "roles": ["visitante"],
+        "recurso_id": 3
+    }
+}
+# Esperado: allow false, razon "denegado_por_politica"
+
+### 20. Usuario inexistente sin excepciones (id 1, cursos_teleco_http)
+POST http://localhost:8181/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "usuario_desconocido",
+        "roles": [],
+        "recurso_id": 1
+    }
+}
+# Esperado: allow false (ningún rol coincide)
