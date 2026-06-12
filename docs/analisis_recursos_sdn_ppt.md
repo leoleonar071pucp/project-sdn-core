@@ -24,6 +24,14 @@ Este documento contiene las tablas de recursos resumidas para uso directo en dia
 | **Controlador SDN**<br>(ONOS) | **vCores** | **2** | Hilos separados para Sesiones OpenFlow (1.0) y Algoritmo de Enrutamiento (1.0). *1 núcleo generaría lag (ping alto) al recalcular rutas.* |
 | | **RAM** | **4 GB** | ONOS (Java) exige una reserva rígida de 2GB (JVM Heap). *Con menos memoria, el recolector de basura bloquearía el controlador SDN al 100% CPU.* |
 
+### C. Plano de Datos y Nodos Finales (Emulados)
+
+| Componente | Recurso | Cantidad | Justificación Breve |
+|---|---|:---:|---|
+| **Switches y Hosts**<br>(SW1-SW5, H1-H4) | **vCores** | **1** | Open vSwitch y comandos simples (ping/curl) operan rápido. *Suficiente para pruebas; no requieren paralelismo.* |
+| | **RAM** | **1 GB** | Cumple el límite mínimo del SO base Ubuntu CLI. *Evita lentitud del sistema operativo.* |
+| | **Disco** | **3 GB** | Peso real de la instalación base sin interfaz gráfica. |
+
 ---
 
 ## 2. Entorno de Producción Universitario (25,000 Usuarios Max)
@@ -44,3 +52,8 @@ Este documento contiene las tablas de recursos resumidas para uso directo en dia
 |---|---|:---:|---|
 | **Nodos Controlador**<br>(Clúster ONOS x3) | **vCores** | **16**<br>*(c/u)* | Requiere potencia brutal para procesar tormentas de *Packet-In* y recalcular de forma reactiva la topología entera del campus. |
 | | **RAM** | **64 GB**<br>*(c/u)* | **48 GB exclusivos para la JVM**. Almacena la tabla de flujos global y bases de sincronización (Atomix). *Evita caídas en cascada que tumbarían el WiFi de la universidad.* |
+
+### C. Plano de Datos (Nodos Físicos)
+*A escala de producción, los Switches (SW) ya no son máquinas virtuales, sino hardware de red físico (Ej. equipos Edgecore o Aruba con soporte OpenFlow).*
+- **Consumo de Servidor:** 0 vCores, 0 RAM.
+- **Razón:** El tráfico se procesa por hardware dedicado en el switch a nivel electrónico (ASICs / Memoria TCAM) a velocidades de 10 a 40 Gbps, por lo que no usan la CPU ni la RAM de tus servidores.
