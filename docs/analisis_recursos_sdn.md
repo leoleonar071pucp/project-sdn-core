@@ -29,6 +29,14 @@ Este entorno emulado (Mininet/OVS) busca probar la viabilidad técnica sin consu
 | **Controlador SDN**<br>(ONOS) | **vCores** | **2** | **Desglose de uso de CPU:**<br>- **1 vCore** para el Servidor OpenFlow (mantener las sesiones TCP con 5 switches).<br>- **1 vCore** para el motor de Inteligencia (Cálculo Dijkstra y traductor M6).<br>**¿Por qué no 1?** Enviar flujos y escuchar eventos a la vez retrasaría los "pings" de los 50 usuarios. |
 | | **RAM** | **4 GB** | **Desglose de uso de RAM:**<br>- **OS Base:** 512 MB.<br>- **JVM (Java Virtual Machine):** 2048 MB (Reserva dura requerida para ONOS `-Xms2G`).<br>- **Subsistemas Atomix:** 512 MB.<br>- **Margen libre:** ~1 GB.<br>**¿Por qué no menos?** ONOS entraría en ciclos constantes de *Garbage Collection* intentando liberar RAM, congelando el controlador. |
 
+### C. Plano de Datos y Nodos Finales (Emulados)
+
+| Máquina | Recurso | Cantidad | Justificación y Desglose por Módulo interno (Para 50 usuarios) |
+|---|---|:---:|---|
+| **Switches y Hosts**<br>(SW1-SW5, H1-H4) | **vCores** | **1** | **¿Por qué 1?** Open vSwitch y comandos simples de cliente (ping/curl/ssh) operan eficientemente sin paralelismo extra en entornos pequeños. |
+| | **RAM** | **1 GB** | **¿Por qué 1 GB?** Es el límite de tolerancia del SO base Ubuntu Server CLI. Si se asignan 512 MB, los procesos del OS harían paginación al disco, ralentizando la simulación de red severamente. |
+| | **Disco** | **3 GB** | **¿Por qué 3 GB?** Es el peso real de la instalación base sin interfaz gráfica de Ubuntu. No crecerá porque no instalarán servicios extra en los hosts ni guardarán historial ahí. |
+
 ---
 
 ## 2. Entorno de Producción (Escala Universitaria)
@@ -43,6 +51,8 @@ La emulación se reemplaza con servidores reales para **10,000 a 25,000 disposit
 | | **Disco** | **1 TB NVMe** | **Desglose:**<br>- **Tablas maestras:** 50 GB.<br>- **Redo/Undo Logs:** 150 GB (Transaccionalidad).<br>- **Historial (Auditoría anual):** 700 GB.<br>**¿Por qué no menos/HDD?** Un disco mecánico tiene ~150 IOPS. Necesitamos SSD NVMe (>50,000 IOPS) para grabar historial de red a velocidad extrema. |
 | **VM Lógica Central**<br>(FreeRADIUS, M1, M2) | **vCores** | **8** | **Desglose:**<br>- **FreeRADIUS:** 4 vCores (Exclusivo para algoritmos de Hashing MD5/SHA y túneles EAP).<br>- **Portal M1 + M2 (OPA):** 4 vCores (Workers web y evaluación de políticas en JSON). |
 | | **RAM** | **16 GB** | **Desglose:**<br>- **Workers Web (Gunicorn/FastAPI):** 4 GB.<br>- **Diccionario de M2 en RAM:** 8 GB.<br>**¿Por qué no menos?** Procesos paralelos compitiendo por RAM terminarían *dropeando* solicitudes HTTP de los estudiantes. |
+| **VM Observabilidad y Monitoreo**<br>(M3, M4, M5 Logs) | **vCores** | **24+** | **Desglose:**<br>- **DPI y Sniffing masivo (M3/M4):** 12 vCores para inspeccionar 10+ Gbps de tráfico concurrente.<br>- **Indexación Logs (M5 - Ej. Logstash):** 12 vCores para parsear miles de Syslogs de Radius y switches. **¿Por qué no menos?** La recolección perdería telemetría valiosa bajo estrés de la red. |
+| | **RAM** | **128 GB+** | **Desglose:**<br>- **Ingesta y Búsqueda Invertida (Ej. Elasticsearch):** 90 GB. Para correlacionar eventos de ciberseguridad (Logs y sesiones) en tiempo real.<br>- **Analítica en Memoria (M4):** 30 GB.<br>**¿Por qué no menos?** Las herramientas de big-data/logging operan bajo la JVM o motores que demandan memoria masiva para búsquedas ultra rápidas de patrones maliciosos. |
 
 ### B. Plano de Control
 
@@ -50,6 +60,11 @@ La emulación se reemplaza con servidores reales para **10,000 a 25,000 disposit
 |---|---|:---:|---|
 | **Nodos Controlador**<br>(Ej. 3 x ONOS) | **vCores** | **16**<br>*(Por nodo)* | **Desglose:**<br>- **Procesamiento de Packet-In:** 8 vCores. 25k dispositivos moviéndose por el campus generan miles de paquetes "nuevos" hacia el controlador.<br>- **Algoritmos de red:** 8 vCores para recalcular caminos si un switch de fibra cae. |
 | | **RAM** | **64 GB**<br>*(Por nodo)* | **Desglose:**<br>- **JVM Heap Size:** 48 GB fijos para almacenar 1 millón+ de Flow Rules en memoria.<br>- **Base Atomix:** 12 GB para sincronización entre los 3 controladores.<br>**¿Por qué no menos?** Falta de RAM genera un fallo en cascada (crash-loop) que apagará el WiFi/red cableada en toda la universidad. |
+
+### C. Plano de Datos (Nodos Físicos)
+*A escala de producción masiva, los Switches ya no son emulaciones de software en servidores.*
+- **Consumo de Servidor:** **0 vCores, 0 RAM** de tus clústeres.
+- **Justificación:** El tráfico se enruta por **hardware de red dedicado** (Ej. equipos Edgecore, Cisco o Aruba con soporte OpenFlow) mediante ASICs integrados y Memoria TCAM a velocidades de 10 Gbps a 100 Gbps reales por puerto, descargando completamente el trabajo a la electrónica del switch.
 
 ### Glosario Técnico Clave:
 * **OOM Killer (Out-Of-Memory Killer):** Un guardia del kernel de Linux. Cuando la RAM se agota, elige a los procesos más pesados (MySQL, Docker, ONOS) y los "asesina" abruptamente para evitar un crasheo general.

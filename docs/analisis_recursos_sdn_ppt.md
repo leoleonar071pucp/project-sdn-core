@@ -45,6 +45,8 @@ Este documento contiene las tablas de recursos resumidas para uso directo en dia
 | | **Disco** | **1 TB (NVMe)** | Requiere SSD NVMe (>50,000 IOPS) para grabar historial de red intensivo. *Un HDD estándar colapsaría el rendimiento de toda la auditoría.* |
 | **Lógica Central**<br>(RADIUS, M1, M2) | **vCores** | **8** | Dedicados para algoritmos criptográficos (Hashing/Túneles) y evaluación JSON veloz. *Previene que RADIUS rechace peticiones por sobrecarga.* |
 | | **RAM** | **16 GB** | Soporta múltiples procesos paralelos (Workers Python) y reglas OPA cacheadas. |
+| **Monitoreo/Logs**<br>(M3, M4, M5) | **vCores** | **24+** | Inspección Masiva (DPI) de 10+ Gbps de tráfico simultáneo y análisis/indexación de miles de syslogs. *Si falta CPU, se pierden alertas críticas.* |
+| | **RAM** | **128 GB+** | Ingesta masiva tipo Elasticsearch/Big-Data. *Requiere RAM enorme para buscar patrones anómalos en tiempo real entre millones de logs.* |
 
 ### B. Plano de Control
 
