@@ -38,11 +38,11 @@ A partir de ahí, la PC del usuario tiene IP, pero todo su tráfico está etique
 
 | Prioridad | Match (Condición) | Acciones (Instructions) | Hard_timeout | Motivo |
 | :--- | :--- | :--- | :--- | :--- |
-| **1000** | `dl_src=AA:BB...` | `apply(set_vlan=210), goto(2)` | `28800` (8h) | Sesión de **Estudiante** válida. |
-| **1000** | `dl_src=FF:EE...` | `apply(set_vlan=300), goto(2)` | `36000` (10h)| Sesión de **Docente** válida. |
+| **1000** | `dl_src=AA:BB...` | `apply(set_vlan=210), goto(2)` | **`600` (10m)** | Sesión de **Estudiante** válida. |
+| **1000** | `dl_src=FF:EE...` | `apply(set_vlan=300), goto(2)` | **`600` (10m)** | Sesión de **Docente** válida. |
 | **10** | `vlan_vid=none` | `apply(set_vlan=90), goto(2)` | `0` (Fija) | **Regla Base:** Equipo nuevo entra a Cuarentena. |
 
-> **Nota:** Se usa `hard_timeout` en las sesiones validadas para forzar que el acceso expire sí o sí cuando se acabe el tiempo de sesión dictado por FreeRADIUS (ej. 8 horas), obligando a un nuevo login.
+> **Nota:** Se usa `hard_timeout` de 10 minutos (600s) en las sesiones validadas para forzar que el acceso expire rápidamente. Esto es vital en PCs compartidas (ej. laboratorios) para evitar que el siguiente usuario herede la sesión y la VLAN del usuario anterior si este olvidó cerrar sesión, obligando a un nuevo login.
 
 ### Tabla 2 (T2): Accesos Macro (Híbrida)
 **Propósito:** Definir qué recursos se pueden alcanzar según la VLAN. Aquí conviven reglas **Proactivas** (fijas) para recursos básicos y reglas **Reactivas** (con `idle_timeout`) para accesos específicos que se instalan al iniciar sesión.
@@ -79,5 +79,5 @@ A partir de ahí, la PC del usuario tiene IP, pero todo su tráfico está etique
 1. **Conexión:** PC conecta -> No tiene IP -> Switch le pone VLAN 90 (T1) -> Envía DHCP a ONOS (T2) -> Recibe IP de cuarentena `192.168.100.X`.
 2. **Navegación bloqueada:** PC intenta ir a Google -> T1 le pone VLAN 90 -> T2 no tiene regla de internet para VLAN 90 -> T3 tampoco -> T4 lo manda a ONOS -> ONOS bloquea/redirecciona al Portal.
 3. **Login:** PC va a Portal Cautivo (`10.0.0.10`) -> T1 pone VLAN 90 -> T2 sí tiene regla para el Portal -> Login Exitoso.
-4. **Liberación:** M1 avisa a ONOS -> ONOS instala regla en T1: *"MAC AA:BB ahora es VLAN 210"*.
-5. **Acceso:** PC va a Cursos (`10.0.0.21`) -> T1 le pone VLAN 210 -> T2 dice *"VLAN 210 a Cursos, pasa"*. (Si la regla expira, se repide vía T4).
+4. **Liberación (Cambio de VLAN):** Al validar credenciales, M1 emite el Token de Rol y avisa a ONOS. ONOS va inmediatamente a la **Tabla 1** e inyecta una nueva regla con altísima prioridad: *"De ahora en adelante, todo lo que venga de la MAC AA:BB, ponle la etiqueta VLAN 210 (Estudiante) en vez de la 90"*.
+5. **Acceso:** Cuando la PC intenta ir a Cursos (`10.0.0.21`), al entrar al switch, la Tabla 1 hace *match* con su MAC y lo re-etiqueta con la VLAN 210 de su facultad. Luego el paquete pasa a la Tabla 2, la cual ve la VLAN 210 y dice *"Estudiantes a Cursos, pasa"*. (Si esta regla en T2 expira por inactividad, se repide vía T4 sin afectar la VLAN 210 de la T1).
