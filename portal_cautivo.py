@@ -351,9 +351,10 @@ class SessionManager:
         finally:
             conn.close()
 
-    def register_session(self, id_usuario, mac, ip_asignada,vlan_id, nombre_rol, switch_dpid, in_port):
+    def register_session(self, id_usuario, mac, ip_asignada, vlan_id, nombre_rol, switch_dpid, in_port):
         """
         Registra la sesión en sesiones_activas.
+        Usa ON DUPLICATE KEY UPDATE para manejar re-logins sin borrado manual.
         Retorna id_sesion si OK, None si falla.
         """
         conn = self.db.get_connection()
@@ -366,9 +367,26 @@ class SessionManager:
                     (id_usuario, mac_address, ip_asignada, vlan_id,
                      nombre_rol, switch_dpid, in_port)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (id_usuario, mac, ip_asignada, vlan_id,nombre_rol, switch_dpid, in_port))
+                ON DUPLICATE KEY UPDATE
+                    id_usuario      = VALUES(id_usuario),
+                    ip_asignada     = VALUES(ip_asignada),
+                    vlan_id         = VALUES(vlan_id),
+                    nombre_rol      = VALUES(nombre_rol),
+                    switch_dpid     = VALUES(switch_dpid),
+                    in_port         = VALUES(in_port),
+                    login_timestamp = NOW(),
+                    id_sesion       = LAST_INSERT_ID(id_sesion)
+            """, (id_usuario, mac, ip_asignada, vlan_id, nombre_rol, switch_dpid, in_port))
             conn.commit()
-            return cur.lastrowid
+            id_sesion = cur.lastrowid or None
+            if not id_sesion:
+                cur.execute(
+                    "SELECT id_sesion FROM sesiones_activas WHERE mac_address = %s",
+                    (mac,)
+                )
+                row = cur.fetchone()
+                id_sesion = row[0] if row else None
+            return id_sesion
         except Exception as e:
             conn.rollback()
             print(f"  [SessionManager] Error al registrar sesión: {e}")
@@ -771,8 +789,22 @@ class CaptivePortal:
                     switch_dpid, in_port
                 )
                 if id_sesion is None:
-                    print("Error al registrar sesión.")
-                    input("Presiona Enter para volver...")
+                    # Limpiar flows de ONOS ya instalados por M6 en este intento
+                    if respuesta_m6:
+                        try:
+                            import urllib.request as _ul2
+                            import json as _js2
+                            m6_base = Config.M6_URL.rsplit("/m6/", 1)[0]
+                            _body2 = _js2.dumps({"mac": mac}).encode('utf-8')
+                            _req2  = _ul2.Request(
+                                f"{m6_base}/m6/cerrar_sesion", data=_body2,
+                                headers={'Content-Type': 'application/json'}
+                            )
+                            _ul2.urlopen(_req2, timeout=3)
+                        except Exception:
+                            pass
+                    print("  Error al registrar sesión.")
+                    input("  Presiona Enter para volver...")
                     return
 
                 # 10. Crear binding IP+MAC

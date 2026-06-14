@@ -603,17 +603,24 @@ class ONOSClient:
                 auth=self.auth, timeout=5
             )
             if resp.status_code in (200, 201):
-                # ONOS 2.7.0 devuelve HTTP 201 con body VACÍO al crear flow.
-                # resp.json() lanzaría JSONDecodeError — tratar body vacío como OK.
-                try:
-                    data = resp.json()
-                except Exception:
-                    data = {}
-                flow_id = (data.get("id") or
-                           data.get("flowId") or
-                           (data.get("flows") or [{}])[0].get("id") or
-                           (data.get("flows") or [{}])[0].get("flowId") or
-                           f"onos-{resp.status_code}-{int(time.time())}")
+                # ONOS 2.7.0 devuelve HTTP 201 con body VACÍO.
+                # El flowId real viene en el header Location:
+                #   /onos/v1/flows/{deviceId}/{flowId}
+                flow_id = None
+                location = resp.headers.get("Location", "")
+                if location:
+                    flow_id = location.rstrip("/").split("/")[-1]
+                if not flow_id:
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = {}
+                    flow_id = (data.get("id") or
+                               data.get("flowId") or
+                               (data.get("flows") or [{}])[0].get("id") or
+                               (data.get("flows") or [{}])[0].get("flowId"))
+                if not flow_id:
+                    flow_id = f"onos-{resp.status_code}-{int(time.time())}"
                 nombre = Config.SWITCH_NOMBRES.get(device_id, device_id[-8:])
                 print(f"    [ONOS] ✓ {nombre} T{flow_entry.get('tableId','?')} "
                       f"prio={flow_entry.get('priority')}  id={flow_id}")
