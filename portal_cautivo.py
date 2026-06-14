@@ -41,8 +41,8 @@ class Config:
     MYSQL_PASS = "radius_pass"
     MYSQL_DB   = "radius_db"
 
-    # M6 — pendiente de implementación
-    # M6_URL = "http://192.168.200.200:8080/api/m6/token"
+    # M6 — Módulo Traductor (Mark Valencia)
+    M6_URL = "http://127.0.0.1:8080/m6/token_rol"
 
     # Máximo intentos antes de bloqueo
     MAX_INTENTOS = 3
@@ -456,6 +456,19 @@ class SessionManager:
             )
 
             conn.commit()
+
+            # Notificar a M6 para eliminar flows de la sesión en ONOS
+            if sesion and hasattr(Config, 'M6_URL') and Config.M6_URL:
+                try:
+                    import requests as _req
+                    m6_base = Config.M6_URL.rsplit("/m6/", 1)[0]
+                    _req.post(f"{m6_base}/m6/cerrar_sesion",
+                              json={"mac": sesion["mac_address"]}, timeout=3)
+                    print(f"  [M1→M6] cerrar_sesion notificado — "
+                          f"mac={sesion['mac_address']}")
+                except Exception as e:
+                    print(f"  [M1→M6] Error al notificar M6: {e}")
+
             return sesion
 
         except Exception as e:
@@ -516,26 +529,23 @@ class TokenEmitter:
             "ip_asignada": ip_asignada
         }
 
-        #  Intentar contactar M6 (Mark)
-        # if Config.M6_URL:
-        #     try:
-        #         import urllib.request
-        #         data = json.dumps(token).encode()
-        #         req  = urllib.request.Request(
-        #             Config.M6_URL, data=data,
-        #             headers={"Content-Type": "application/json"},
-        #             method="POST"
-        #         )
-        #         with urllib.request.urlopen(req, timeout=3) as resp:
-        #             respuesta = json.loads(resp.read())
-        #             print(f"  [M1→M6] Token enviado — HTTP {resp.status}")
-        #             return respuesta  # {mac, switch_dpid, in_port}
-        #     except Exception as e:
-        #         print(f"  [M1→M6] M6 no disponible: {e}")
-        #         return None
+        # Contactar M6 (Mark Valencia)
+        if hasattr(Config, 'M6_URL') and Config.M6_URL:
+            try:
+                import requests as _req
+                resp = _req.post(Config.M6_URL, json=token, timeout=5)
+                if resp.status_code == 200:
+                    respuesta = resp.json()
+                    print(f"  [M1→M6] ✓ Token enviado — "
+                          f"mac={respuesta.get('mac')}")
+                    return respuesta  # {mac, switch_dpid, in_port}
+                else:
+                    print(f"  [M1→M6] M6 respondió HTTP {resp.status_code}")
+            except Exception as e:
+                print(f"  [M1→M6] M6 no disponible: {e}")
 
-        # Modo simulado (M6 no disponible aún) 
-        print(f"\n  [M1→M6] Token de Rol (simulado — M6 pendiente):")
+        # Modo simulado cuando M6 no responde
+        print(f"\n  [M1→M6] Token de Rol (M6 no disponible — modo simulado):")
         print("  " + Config.SEP2)
         for k, v in token.items():
             print(f"    {k:<14}: {v}")
