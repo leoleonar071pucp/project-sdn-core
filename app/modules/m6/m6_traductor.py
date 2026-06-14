@@ -367,6 +367,35 @@ class FlowBuilder:
             "treatment": {"clearDeferred": True, "instructions": []}
         }
 
+    def t0_table_miss_normal(self, device_id):
+        """T0 prio1 — table-miss → NORMAL (forwarding por defecto en SW tránsito)."""
+        return {
+            "priority":    1,
+            "isPermanent": True,
+            "deviceId":    device_id,
+            "tableId":     0,
+            "selector":    {"criteria": []},
+            "treatment":   {"instructions": [{"type": "OUTPUT", "port": "NORMAL"}]}
+        }
+
+    def t0_return_flow(self, device_id, dst_mac, out_port, session_timeout=28800):
+        """T0 prio200 — respuesta de servidores → host (IN_PORT=1=uplink, ETH_DST=MAC)."""
+        return {
+            "priority":    200,
+            "isPermanent": False,
+            "timeout":     session_timeout,
+            "deviceId":    device_id,
+            "tableId":     0,
+            "selector": {"criteria": [
+                {"type": "IN_PORT",  "port": 1},
+                {"type": "ETH_TYPE", "ethType": "0x0800"},
+                {"type": "ETH_DST",  "mac":  dst_mac}
+            ]},
+            "treatment": {"instructions": [
+                {"type": "OUTPUT", "port": out_port}
+            ]}
+        }
+
 
 # ─── Log asíncrono hacia M5 ───────────────────────────────────────────────────
 class M5Logger:
@@ -511,12 +540,18 @@ class PolicyEngine:
                     ip, []
                 ).append(puerto)
 
+            # El mapeo N→1 de IPs (cursos_telecom/info/electro → mismo servidor)
+            # puede generar ALLOW y DENY para la misma IP real. ALLOW prevalece.
+            for ip in list(deny_map.keys()):
+                if ip in allow_map:
+                    del deny_map[ip]
+
             print(f"  [PolicyEngine] MySQL — {nombre_rol}: "
                   f"{len(allow_map)} destinos ALLOW, {len(deny_map)} DENY")
             return {
-                "permisos":    [{"ip_dst": ip, "puertos": ps}
+                "permisos":    [{"ip_dst": ip, "puertos": sorted(set(ps))}
                                 for ip, ps in allow_map.items()],
-                "denegaciones":[{"ip_dst": ip, "puertos": ps}
+                "denegaciones":[{"ip_dst": ip, "puertos": sorted(set(ps))}
                                 for ip, ps in deny_map.items()]
             }
         except Exception as e:
@@ -747,6 +782,19 @@ class M6Translator:
             self.onos.instalar_flow(device_id, self.builder.t0_allow_arp(device_id))
             print(f"    ✓ {nombre}")
 
+        # T0: table-miss NORMAL en SW1 y SW3 (switches de tránsito — no hacen enforcement)
+        # Sin esto, el tráfico de H1→H3 se pierde al no matchear ningún flow en SW1/SW3.
+        print(f"\n  [T0] Table-miss NORMAL en switches de tránsito (SW1, SW3):")
+        for device_id in [Config.SW1, Config.SW3]:
+            if device_id in devices_set:
+                self.onos.instalar_flow(device_id,
+                    self.builder.t0_table_miss_normal(device_id))
+                nombre = Config.SWITCH_NOMBRES.get(device_id, device_id)
+                print(f"    ✓ {nombre}")
+            else:
+                nombre = Config.SWITCH_NOMBRES.get(device_id, device_id)
+                print(f"    ⚠  {nombre} no disponible")
+
         # T2: ALLOW proactivo por VLAN (tabla 2, permanente, instalado una vez)
         POLITICAS_T2 = [
             (210, Config.SERVER_CURSOS, "Est.Telecom → cursos"),
@@ -810,6 +858,15 @@ class M6Translator:
         self._instalar_y_cachear(
             switch_dpid,
             self.builder.set_vlan_post_auth(switch_dpid, mac, in_port, vlan_id),
+            mac
+        )
+
+        # T0 return flow: respuestas de servidores → host (instalado per-sesión)
+        # IN_PORT=1 = uplink de SW1; ETH_DST=MAC del host; OUTPUT=puerto del host
+        print(f"  [T0] Return flow → puerto {in_port}...")
+        self._instalar_y_cachear(
+            switch_dpid,
+            self.builder.t0_return_flow(switch_dpid, mac, in_port),
             mac
         )
 

@@ -562,7 +562,6 @@ class TokenEmitter:
             print(f"    {k:<14}: {v}")
         print("  " + Config.SEP2)
         print("  M6 instalará SET_FIELD vlan_vid en ONOS.\n")
-
         # Retornamos None para indicar que M6 no respondió
         # SessionManager usará valores por defecto
         return None
