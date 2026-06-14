@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 m6_traductor.py — Módulo Traductor SDN PUCP | Grupo 2 TEL354
-Autor: Mark Valencia (20221747)
+Mark V
 
 Única interfaz entre la lógica de negocio y ONOS Controller.
 M1, M2 y M4 NUNCA tocan ONOS directamente — todo pasa por M6.
@@ -333,6 +333,21 @@ class FlowBuilder:
             "treatment": {"clearDeferred": True, "instructions": []}
         }
 
+    def t0_allow_arp(self, device_id):
+        """T0 prio500 — ARP broadcast/unicast → OUTPUT NORMAL (resolución MAC)."""
+        return {
+            "priority":    500,
+            "isPermanent": True,
+            "deviceId":    device_id,
+            "tableId":     0,
+            "selector": {"criteria": [
+                {"type": "ETH_TYPE", "ethType": "0x0806"}
+            ]},
+            "treatment": {"instructions": [
+                {"type": "OUTPUT", "port": "NORMAL"}
+            ]}
+        }
+
     # ── T0: Bloqueo atacante (tabla 0) ───────────────────────────────────────
 
     def t0_bloqueo_ataque(self, device_id, ip_atacante, ttl=600, prio=None):
@@ -553,12 +568,17 @@ class ONOSClient:
                 auth=self.auth, timeout=5
             )
             if resp.status_code in (200, 201):
-                data = resp.json()
-                # ONOS 2.7.0 devuelve campo "id"; versiones antiguas "flowId"
+                # ONOS 2.7.0 devuelve HTTP 201 con body VACÍO al crear flow.
+                # resp.json() lanzaría JSONDecodeError — tratar body vacío como OK.
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = {}
                 flow_id = (data.get("id") or
                            data.get("flowId") or
                            (data.get("flows") or [{}])[0].get("id") or
-                           (data.get("flows") or [{}])[0].get("flowId"))
+                           (data.get("flows") or [{}])[0].get("flowId") or
+                           f"onos-{resp.status_code}-{int(time.time())}")
                 nombre = Config.SWITCH_NOMBRES.get(device_id, device_id[-8:])
                 print(f"    [ONOS] ✓ {nombre} T{flow_entry.get('tableId','?')} "
                       f"prio={flow_entry.get('priority')}  id={flow_id}")
@@ -598,7 +618,7 @@ class ONOSClient:
         """
         try:
             resp = requests.get(
-                f"{self.url}/onos/v1/hosts", auth=self.auth, timeout=5
+                f"{self.url}/onos/v1/hosts", auth=self.auth, timeout=2
             )
             if resp.status_code == 200:
                 for host in resp.json().get("hosts", []):
@@ -719,6 +739,13 @@ class M6Translator:
             else:
                 sw = Config.SWITCH_NOMBRES.get(dpid, dpid)
                 print(f"    ⚠  {sw} no disponible — omitiendo: {desc}")
+
+        # T0: ARP pass-through en todos los switches (necesario para resolución MAC)
+        print(f"\n  [T0] ARP pass-through (0x0806 → NORMAL):")
+        for device_id in devices:
+            nombre = Config.SWITCH_NOMBRES.get(device_id, device_id)
+            self.onos.instalar_flow(device_id, self.builder.t0_allow_arp(device_id))
+            print(f"    ✓ {nombre}")
 
         # T2: ALLOW proactivo por VLAN (tabla 2, permanente, instalado una vez)
         POLITICAS_T2 = [

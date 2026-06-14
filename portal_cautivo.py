@@ -63,15 +63,6 @@ class DatabaseManager:
             return None
         try:
             conexion = mysql.connector.connect(
-<<<<<<< HEAD
-            host         = Config.MYSQL_HOST,
-            user         = Config.MYSQL_USER,
-            password     = Config.MYSQL_PASS,
-            database     = Config.MYSQL_DB,
-            autocommit   = False,
-            use_pure     = True,
-            ssl_disabled = True
-=======
                 host     = Config.MYSQL_HOST,
                 user     = Config.MYSQL_USER,
                 password = Config.MYSQL_PASS,
@@ -79,7 +70,6 @@ class DatabaseManager:
                 autocommit = False,
                 use_pure     = True,
                 ssl_disabled = True
->>>>>>> ca89b7a169b7a0008e555161e3b479e375855cfa
             )
             return conexion
         except mysql.connector.Error as e:
@@ -469,10 +459,15 @@ class SessionManager:
             # Notificar a M6 para eliminar flows de la sesión en ONOS
             if sesion and hasattr(Config, 'M6_URL') and Config.M6_URL:
                 try:
-                    import requests as _req
+                    import urllib.request as _ul
+                    import json as _js
                     m6_base = Config.M6_URL.rsplit("/m6/", 1)[0]
-                    _req.post(f"{m6_base}/m6/cerrar_sesion",
-                              json={"mac": sesion["mac_address"]}, timeout=3)
+                    _body = _js.dumps({"mac": sesion["mac_address"]}).encode('utf-8')
+                    _req  = _ul.Request(
+                        f"{m6_base}/m6/cerrar_sesion", data=_body,
+                        headers={'Content-Type': 'application/json'}
+                    )
+                    _ul.urlopen(_req, timeout=3)
                     print(f"  [M1→M6] cerrar_sesion notificado — "
                           f"mac={sesion['mac_address']}")
                 except Exception as e:
@@ -538,18 +533,25 @@ class TokenEmitter:
             "ip_asignada": ip_asignada
         }
 
-        # Contactar M6 (Mark Valencia)
+        # Contactar M6 (Mark Valencia) — usa urllib (stdlib) para evitar
+        # segfault de requests/cryptography en Python 3.6 con swap lleno
         if hasattr(Config, 'M6_URL') and Config.M6_URL:
             try:
-                import requests as _req
-                resp = _req.post(Config.M6_URL, json=token, timeout=5)
-                if resp.status_code == 200:
-                    respuesta = resp.json()
-                    print(f"  [M1→M6] ✓ Token enviado — "
-                          f"mac={respuesta.get('mac')}")
-                    return respuesta  # {mac, switch_dpid, in_port}
-                else:
-                    print(f"  [M1→M6] M6 respondió HTTP {resp.status_code}")
+                import urllib.request as _ul
+                import json as _js
+                _body = _js.dumps(token).encode('utf-8')
+                _req  = _ul.Request(
+                    Config.M6_URL, data=_body,
+                    headers={'Content-Type': 'application/json'}
+                )
+                with _ul.urlopen(_req, timeout=12) as _resp:
+                    if _resp.status == 200:
+                        respuesta = _js.loads(_resp.read())
+                        print(f"  [M1→M6] ✓ Token enviado — "
+                              f"mac={respuesta.get('mac')}")
+                        return respuesta  # {mac, switch_dpid, in_port}
+                    else:
+                        print(f"  [M1→M6] M6 respondió HTTP {_resp.status}")
             except Exception as e:
                 print(f"  [M1→M6] M6 no disponible: {e}")
 
@@ -735,16 +737,6 @@ class CaptivePortal:
                     codigo, nombre_rol, vlan_id, ip_asignada
                 )
 
-                #  PENDIENTE DE INTEGRACIÓN CON M6 
-                # Cuando M6 esté disponible, respuesta_m6 debe contener:
-                #   {
-                #     "mac":         "FA:16:3E:14:78:63",
-                #     "switch_dpid": "of:000072e0807e854c",
-                #     "in_port":     2
-                #   }
-                # M6 obtiene esos datos consultando ONOS con ip_asignada.
-                # Reemplazar el bloque 'else' por el manejo real de respuesta_m6.
-                # ---------------------------------------------------------------
                 if respuesta_m6:
                     mac         = respuesta_m6["mac"]
                     switch_dpid = respuesta_m6["switch_dpid"]
