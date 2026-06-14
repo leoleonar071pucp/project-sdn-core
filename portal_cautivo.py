@@ -63,6 +63,7 @@ class DatabaseManager:
             return None
         try:
             conexion = mysql.connector.connect(
+<<<<<<< HEAD
             host         = Config.MYSQL_HOST,
             user         = Config.MYSQL_USER,
             password     = Config.MYSQL_PASS,
@@ -70,6 +71,15 @@ class DatabaseManager:
             autocommit   = False,
             use_pure     = True,
             ssl_disabled = True
+=======
+                host     = Config.MYSQL_HOST,
+                user     = Config.MYSQL_USER,
+                password = Config.MYSQL_PASS,
+                database = Config.MYSQL_DB,
+                autocommit = False,
+                use_pure     = True,
+                ssl_disabled = True
+>>>>>>> ca89b7a169b7a0008e555161e3b479e375855cfa
             )
             return conexion
         except mysql.connector.Error as e:
@@ -730,12 +740,12 @@ class CaptivePortal:
                     switch_dpid = respuesta_m6["switch_dpid"]
                     in_port     = respuesta_m6["in_port"]
                 else:
-                    # TODO: eliminar este bloque cuando M6 esté integrado
-                    # Valores de demo para pruebas sin M6
-                    print("  [AVISO] M6 no disponible — usando valores demo")
-                    mac         = "00:00:00:00:00:00"
-                    switch_dpid = "of:0000000000000000"
-                    in_port     = 0
+                    # Valores demo del slice VNRT real (H1 en SW2 puerto 2)
+                    # Reemplazar por respuesta_m6 cuando M6 esté integrado
+                    print("  [AVISO] M6 no disponible — usando valores demo del slice")
+                    mac         = "FA:16:3E:53:F8:E8"   # MAC real de H1
+                    switch_dpid = "of:000072e0807e854c"  # SW2 real
+                    in_port     = 2                       # Puerto de H1 en SW2
 
                 # 7. Obtener id_usuario
                 id_usuario = self.users.get_id(codigo)
