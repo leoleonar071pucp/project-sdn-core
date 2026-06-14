@@ -47,7 +47,7 @@ class Config:
     # M2's init.sql usa IPs del diseño original; VNRT tiene 2 servidores reales.
     IP_MAPPING_M2 = {
         "10.0.0.21": "192.168.100.200",  # cursos_telecom → H3
-        "10.0.0.22": "192.168.100.200",  # cursos_info    → H3
+        "10.0.0.22": "192.168.100.201",  # cursos_info    → H4 (VLAN 220)
         "10.0.0.23": "192.168.100.200",  # cursos_electro → H3
         "10.0.0.30": "192.168.100.201",  # servidor_notas → H4
         "10.0.0.40": "192.168.100.201",  # panel_admin    → H4
@@ -696,6 +696,49 @@ class ONOSClient:
             print(f"  [ONOS] Error GET /devices: {e}")
         return []
 
+    def get_access_ports(self, device_id):
+        """
+        Devuelve los puertos de acceso (hacia hosts) de un switch.
+        Consulta ONOS para obtener todos los puertos y resta los enlaces
+        inter-switch (trunks) detectados por LLDP en /onos/v1/links.
+        """
+        all_ports = set()
+        try:
+            resp = requests.get(
+                f"{self.url}/onos/v1/devices/{device_id}/ports",
+                auth=self.auth, timeout=3
+            )
+            if resp.status_code == 200:
+                for p in resp.json().get("ports", []):
+                    num = p.get("port", "")
+                    if str(num).isdigit() and int(num) < 65534:
+                        all_ports.add(int(num))
+        except Exception as e:
+            print(f"  [ONOS] Error GET /devices/{device_id}/ports: {e}")
+            return []
+
+        trunk_ports = set()
+        try:
+            resp = requests.get(
+                f"{self.url}/onos/v1/links", auth=self.auth, timeout=3
+            )
+            if resp.status_code == 200:
+                for link in resp.json().get("links", []):
+                    for endpoint in ("src", "dst"):
+                        ep = link.get(endpoint, {})
+                        if ep.get("device") == device_id:
+                            try:
+                                trunk_ports.add(int(ep["port"]))
+                            except (ValueError, KeyError):
+                                pass
+        except Exception as e:
+            print(f"  [ONOS] Error GET /links: {e}")
+
+        access_ports = sorted(all_ports - trunk_ports)
+        nombre = Config.SWITCH_NOMBRES.get(device_id, device_id[-8:])
+        print(f"  [ONOS] {nombre} — acceso={access_ports} trunk={sorted(trunk_ports)}")
+        return access_ports
+
     def instalar_flow(self, device_id, flow_entry):
         return self._post_flow(device_id, flow_entry)
 
@@ -743,6 +786,10 @@ class M6Translator:
         print(f"[M6] {SEP}")
 
         # T1: Cuarentena VLAN 90 en todos los switches
+        # VLAN push solo en SW2 (host access); puertos descubiertos dinámicamente
+        sw2_access_ports = (self.onos.get_access_ports(Config.SW2)
+                            if Config.SW2 in devices_set else [])
+
         for device_id in devices:
             nombre = Config.SWITCH_NOMBRES.get(device_id, device_id)
             print(f"\n  → {nombre}")
@@ -753,21 +800,25 @@ class M6Translator:
                 self.builder.portal_cuarentena_t1(device_id))
             self.onos.instalar_flow(device_id,
                 self.builder.drop_default_cuarentena(device_id))
-            for puerto in [2, 3]:
-                self.onos.instalar_flow(device_id,
-                    self.builder.vlan_push_cuarentena(device_id, puerto))
+            if device_id == Config.SW2:
+                for puerto in sw2_access_ports:
+                    self.onos.instalar_flow(device_id,
+                        self.builder.vlan_push_cuarentena(device_id, puerto))
+                print(f"    T1 VLAN push cuarentena → puertos acceso: {sw2_access_ports}")
 
         # T0: Rutas directas portal (tabla 0) — verificadas con SSH H1→portal
-        #  Forward: SW2 IN_PORT=2, dst=portal → OUTPUT 1 (hacia SW1)
+        #  Forward: SW2 IN_PORT=<acceso>, dst=portal → OUTPUT 1 (dinámico por host)
         #           SW1 IN_PORT=2, dst=portal → OUTPUT 1 (hacia ctrl/portal)
         #  Return:  SW1 IN_PORT=1, src=portal → OUTPUT 2 (hacia SW2)
-        #           SW2 IN_PORT=1, src=portal → OUTPUT 2 (hacia host)
+        #           SW2 IN_PORT=1, src=portal → NORMAL   (OVS L2 entrega al host correcto)
         PORTAL_IP   = Config.PORTAL_IP
         rutas_portal = [
-            (Config.SW2, 2, "dst", PORTAL_IP, 1, "SW2 cliente→portal"),
-            (Config.SW2, 1, "src", PORTAL_IP, 2, "SW2 portal→cliente"),
-            (Config.SW1, 2, "dst", PORTAL_IP, 1, "SW1 SW2→ctrl"),
-            (Config.SW1, 1, "src", PORTAL_IP, 2, "SW1 ctrl→SW2"),
+            (Config.SW2, p, "dst", PORTAL_IP, 1, f"SW2 p{p}→portal")
+            for p in sw2_access_ports
+        ] + [
+            (Config.SW2, 1, "src", PORTAL_IP, "NORMAL", "SW2 portal→hosts NORMAL"),
+            (Config.SW1, 2, "dst", PORTAL_IP, 1,        "SW1 SW2→ctrl"),
+            (Config.SW1, 1, "src", PORTAL_IP, 2,        "SW1 ctrl→SW2"),
         ]
         print(f"\n  [T0] Rutas directas portal ({PORTAL_IP}):")
         for dpid, in_port, tipo, ip, out_port, desc in rutas_portal:
@@ -804,13 +855,13 @@ class M6Translator:
 
         # T2: ALLOW proactivo por VLAN (tabla 2, permanente, instalado una vez)
         POLITICAS_T2 = [
-            (210, Config.SERVER_CURSOS, "Est.Telecom → cursos"),
-            (220, Config.SERVER_CURSOS, "Est.Informatica → cursos"),
-            (230, Config.SERVER_CURSOS, "Est.Electronica → cursos"),
-            (300, Config.SERVER_CURSOS, "Docente → cursos"),
-            (300, Config.SERVER_NOTAS,  "Docente → notas"),
-            (400, Config.SERVER_CURSOS, "Admin_TI → cursos"),
-            (400, Config.SERVER_NOTAS,  "Admin_TI → notas"),
+            (210, Config.SERVER_CURSOS, "Est.Telecom → H3 cursos_telecom"),
+            (220, Config.SERVER_NOTAS,  "Est.Informatica → H4 cursos_info"),
+            (230, Config.SERVER_CURSOS, "Est.Electronica → H3 cursos_electro"),
+            (300, Config.SERVER_CURSOS, "Docente → H3 cursos"),
+            (300, Config.SERVER_NOTAS,  "Docente → H4 notas"),
+            (400, Config.SERVER_CURSOS, "Admin_TI → H3 cursos"),
+            (400, Config.SERVER_NOTAS,  "Admin_TI → H4 notas"),
         ]
         print(f"\n  [T2] Políticas VLAN proactivas (tabla 2):")
         if Config.SW2 in devices_set:
