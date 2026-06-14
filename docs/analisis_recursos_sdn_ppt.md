@@ -1,61 +1,27 @@
 # Dimensionamiento SDN Core - Versión Presentación (PPT)
 
-Este documento contiene las tablas de recursos resumidas para uso directo en diapositivas. Mantiene el sustento técnico pero en un formato *bullet-point* rápido de leer.
+Tablas compactas de recursos optimizadas para diapositivas, incluyendo plataformas y alineadas con la rúbrica de evaluación.
 
 ---
 
-## 1. Entorno de Laboratorio / Demo (50 Usuarios Max)
+## 1. Entorno de Laboratorio / Demo (Prueba Piloto: 50 Usuarios)
 
-### A. Plano de Gestión y Seguridad (VMs)
-
-| Componente | Recurso | Cantidad | Justificación Breve |
-|---|---|:---:|---|
-| **VM 1: Auth & Autho**<br>(MySQL, RADIUS, M1, M2) | **vCores** | **2** | Necesarios para paralelismo: MySQL (0.5), FreeRADIUS/M1 (0.5), Docker/OPA (0.8). *Menos de 2 causaría Timeouts en logins simultáneos.* |
-| | **RAM** | **4 GB** | OS (0.5GB), Buffer de MySQL (1GB), RADIUS/M1 (0.5GB), Docker/OPA (1GB). *Margen extra de 1GB para evitar crasheos por OOM Killer.* |
-| | **Disco** | **15 GB** | Sistema Base (3GB) + Imágenes Docker (5GB) + BD/Logs. *Evita que el sistema colapse al llegar al 100% descargando contenedores.* |
-| **VM 2: Monitoreo**<br>(M3, M4, M5, MySQL) | **vCores** | **2** | Inspección de red (1.0) y estructuración de logs (0.5). *Un solo núcleo causaría pérdida de paquetes maliciosos durante el sniffing.* |
-| | **RAM** | **4 GB** | Buffer en memoria para indexar los Logs de Auditoría (1GB) y reglas de M3/M4 (1GB). *1 GB total fragmentaría la memoria y colapsaría el monitoreo.* |
-| | **Disco** | **20 GB** | Necesario para escribir Capturas de Red crudas (PCAP) y Logs constantes. *Suficiente para pruebas sin saturar la VM.* |
-
-### B. Plano de Control
-
-| Componente | Recurso | Cantidad | Justificación Breve |
-|---|---|:---:|---|
-| **Controlador SDN**<br>(ONOS) | **vCores** | **2** | Hilos separados para Sesiones OpenFlow (1.0) y Algoritmo de Enrutamiento (1.0). *1 núcleo generaría lag (ping alto) al recalcular rutas.* |
-| | **RAM** | **4 GB** | ONOS (Java) exige una reserva rígida de 2GB (JVM Heap). *Con menos memoria, el recolector de basura bloquearía el controlador SDN al 100% CPU.* |
-
-### C. Plano de Datos y Nodos Finales (Emulados)
-
-| Componente | Recurso | Cantidad | Justificación Breve |
-|---|---|:---:|---|
-| **Switches y Hosts**<br>(SW1-SW5, H1-H4) | **vCores** | **1** | Open vSwitch y comandos simples (ping/curl) operan rápido. *Suficiente para pruebas; no requieren paralelismo.* |
-| | **RAM** | **1 GB** | Cumple el límite mínimo del SO base Ubuntu CLI. *Evita lentitud del sistema operativo.* |
-| | **Disco** | **3 GB** | Peso real de la instalación base sin interfaz gráfica. |
+| Componente | Función | SO / Plataforma | vCPU | RAM | Disco | Justificación Rápida |
+|---|---|---|:---:|:---:|:---:|---|
+| **VM 1: Auth & Autho**<br>(M1, M2, RADIUS, DB) | Evaluar políticas OPA y validar logins criptográficos. | **Ubuntu 18.04**<br>+ Docker | **2** | **4 GB** | **8 GB** | **CPU/RAM:** Paraleliza procesos de MySQL y OPA para no generar *Timeouts* de login. Previene crasheos por *OOM Killer*. |
+| **VM 2: Monitoreo**<br>(M3, M4, M5 Logs) | Sniffing de red y correlación/recolección de alertas. | **Ubuntu 18.04** | **2** | **4 GB** | **8 GB** | **CPU:** 1 núcleo para captura (evitando pérdida de paquetes) y 1 para analizar. **Disco:** 8GB es holgado para PCAPs de prueba corta. |
+| **Controlador SDN**<br>(ONOS) | Cerebro: Descubre topología y enruta paquetes. | **Ubuntu 18.04**<br>+ Java (JVM) | **2** | **4 GB** | **8 GB** | **RAM:** Java exige reserva dura (2GB Heap). Menos memoria causaría *Garbage Collection* constante y lag en la red. |
+| **Switches de Red**<br>(SW1 - SW5) | Plano de datos: reenvío de paquetes OpenFlow. | **Ubuntu 18.04**<br>+ OVS | **1** | **1 GB** | **3 GB** | **Recursos:** El enrutamiento se delega a ONOS. 1vCPU y 1GB sobra para que el switch opere sin paginar memoria al disco. |
+| **Nodos Finales**<br>(Hosts / Servidores) | Clientes emulados que generan tráfico de prueba. | **Ubuntu 18.04**<br>(CLI) | **1** | **1 GB** | **3 GB** | Nodos zombies para comandos `ping`/`curl`. El mínimo soportado por Ubuntu Server sin fallar. |
 
 ---
 
-## 2. Entorno de Producción Universitario (25,000 Usuarios Max)
+## 2. Entorno de Producción Universitario (Escalabilidad: 25k Usuarios)
 
-### A. Plano de Gestión y Seguridad (Cluster)
-
-| Componente | Recurso | Cantidad | Justificación Breve |
-|---|---|:---:|---|
-| **Base de Datos**<br>(MySQL Cluster) | **vCores** | **16** | Paraleliza miles de bloqueos, lecturas y escrituras por segundo generadas a las 8:00 AM. *Previene colas de espera eternas en el portal.* |
-| | **RAM** | **64 GB** | Carga la tabla total de 25k usuarios directo en RAM (*InnoDB Buffer Pool*). *Multiplica la velocidad de login; evita leer discos mecánicos.* |
-| | **Disco** | **1 TB (NVMe)** | Requiere SSD NVMe (>50,000 IOPS) para grabar historial de red intensivo. *Un HDD estándar colapsaría el rendimiento de toda la auditoría.* |
-| **Lógica Central**<br>(RADIUS, M1, M2) | **vCores** | **8** | Dedicados para algoritmos criptográficos (Hashing/Túneles) y evaluación JSON veloz. *Previene que RADIUS rechace peticiones por sobrecarga.* |
-| | **RAM** | **16 GB** | Soporta múltiples procesos paralelos (Workers Python) y reglas OPA cacheadas. |
-| **Monitoreo/Logs**<br>(M3, M4, M5) | **vCores** | **24+** | Inspección Masiva (DPI) de 10+ Gbps de tráfico simultáneo y análisis/indexación de miles de syslogs. *Si falta CPU, se pierden alertas críticas.* |
-| | **RAM** | **128 GB+** | Ingesta masiva tipo Elasticsearch/Big-Data. *Requiere RAM enorme para buscar patrones anómalos en tiempo real entre millones de logs.* |
-
-### B. Plano de Control
-
-| Componente | Recurso | Cantidad | Justificación Breve |
-|---|---|:---:|---|
-| **Nodos Controlador**<br>(Clúster ONOS x3) | **vCores** | **16**<br>*(c/u)* | Requiere potencia brutal para procesar tormentas de *Packet-In* y recalcular de forma reactiva la topología entera del campus. |
-| | **RAM** | **64 GB**<br>*(c/u)* | **48 GB exclusivos para la JVM**. Almacena la tabla de flujos global y bases de sincronización (Atomix). *Evita caídas en cascada que tumbarían el WiFi de la universidad.* |
-
-### C. Plano de Datos (Nodos Físicos)
-*A escala de producción, los Switches (SW) ya no son máquinas virtuales, sino hardware de red físico (Ej. equipos Edgecore o Aruba con soporte OpenFlow).*
-- **Consumo de Servidor:** 0 vCores, 0 RAM.
-- **Razón:** El tráfico se procesa por hardware dedicado en el switch a nivel electrónico (ASICs / Memoria TCAM) a velocidades de 10 a 40 Gbps, por lo que no usan la CPU ni la RAM de tus servidores.
+| Componente | Función | SO / Plataforma | vCPU | RAM | Disco | Justificación de Escalabilidad |
+|---|---|---|:---:|:---:|:---:|---|
+| **Clúster Base de Datos**<br>(MySQL) | Persistencia de sesiones, usuarios y RBAC. | **Linux Enterprise** | **16** | **64 GB** | **1 TB**<br>(NVMe) | **Escalabilidad:** Carga la tabla entera de 25k alumnos directamente en RAM (*Buffer Pool*) logrando respuestas en milisegundos. |
+| **Clúster Lógica**<br>(M1, M2, RADIUS) | Criptografía y API de portal cautivo. | **Linux Enterprise**<br>+ K8s / Docker | **8** | **16 GB** | **50 GB** | **Escalabilidad:** Múltiples workers balanceados para absorber ráfagas masivas de Hashing (RADIUS) a las 8:00 AM. |
+| **Monitoreo/Logs**<br>(M3, M4, M5) | Ingesta masiva de syslogs e inspección DPI. | **Linux Enterprise**<br>+ Elastic Stack | **24+** | **128 GB+** | **2 TB+**<br>(SSD) | **Escalabilidad:** Las bases analíticas *Big Data* (Elastic) exigen RAM masiva para buscar ataques en millones de registros. |
+| **Controlador SDN**<br>(Clúster ONOS x3) | Sincronización del estado de red. | **Linux Enterprise**<br>+ JVM Cluster | **16**<br>*(c/u)* | **64 GB**<br>*(c/u)* | **250 GB**<br>*(c/u)* | **Escalabilidad:** Si falta memoria para el árbol de la topología distribuida, el crasheo *OOM* tumbaría la red del campus entero. |
+| **Plano de Datos**<br>(Switches Core) | Conmutación de hardware (Bare-metal). | **Equipos Físicos**<br>(Aruba / Cisco) | **0** | **0** | **0** | **Escalabilidad:** Procesan a 40-100 Gbps por puerto mediante chips ASIC/TCAM físicos, sin usar virtualización. |
