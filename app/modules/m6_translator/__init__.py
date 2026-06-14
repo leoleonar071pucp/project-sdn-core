@@ -1,1 +1,0 @@
-"""ONOS translator module."""

@@ -40,7 +40,19 @@ class Config:
     ONOS_AUTH = ("onos", "rocks")
 
     # OPA — puerto 8182 (distinto de ONOS que usa 8181)
-    OPA_URL = "http://127.0.0.1:8182/v1/data/rbac/allow"
+    # Endpoint real de M2: package policy → /v1/data/policy/result
+    OPA_URL = "http://127.0.0.1:8182/v1/data/policy/result"
+
+    # Mapeo IPs diseño M2 (10.0.0.x) → IPs reales VNRT (192.168.100.x)
+    # M2's init.sql usa IPs del diseño original; VNRT tiene 2 servidores reales.
+    IP_MAPPING_M2 = {
+        "10.0.0.21": "192.168.100.200",  # cursos_telecom → H3
+        "10.0.0.22": "192.168.100.200",  # cursos_info    → H3
+        "10.0.0.23": "192.168.100.200",  # cursos_electro → H3
+        "10.0.0.30": "192.168.100.201",  # servidor_notas → H4
+        "10.0.0.40": "192.168.100.201",  # panel_admin    → H4
+        "10.0.0.10": "192.168.100.1",    # portal_cautivo → controller
+    }
 
     # M5 auditoría
     M5_URL = "http://127.0.0.1:5002/m5/log"
@@ -378,28 +390,74 @@ class PolicyEngine:
         """
         payload_opa: {"input": {codigo_pucp, rol, vlan_id, ip_asignada, ...}}
         Retorna: {"permisos": [...], "denegaciones": [...]}
+
+        Cadena de fallback: OPA M2 → MySQL → hardcoded por VLAN
         """
-        # 1. OPA (M2) — ideal, usa políticas RBAC completas
+        input_data  = payload_opa.get("input", {})
+        codigo_pucp = input_data.get("codigo_pucp", "")
+        nombre_rol  = input_data.get("rol", "")
+        vlan_id     = int(input_data.get("vlan_id", 0))
+
+        # 1. OPA (M2) — usa políticas RBAC completas con excepciones temporales
+        #    M2 espera: {usuario: str, roles: [str]}  (NO codigo_pucp/rol directos)
+        #    M2 retorna: {permisos: [{recurso:{ip_dst,puerto,nombre}, tabla, ...}]}
+        opa_payload = {
+            "input": {
+                "usuario": codigo_pucp,
+                "roles":   [nombre_rol]   # M2 Rego requiere array
+            }
+        }
         try:
-            resp = requests.post(Config.OPA_URL, json=payload_opa, timeout=3)
+            resp = requests.post(Config.OPA_URL, json=opa_payload, timeout=3)
             if resp.status_code == 200:
-                resultado = resp.json().get("result", {})
-                if resultado.get("permisos") is not None:
-                    print("  [PolicyEngine] Políticas desde OPA (M2)")
-                    return resultado
+                resultado    = resp.json().get("result", {})
+                m2_permisos  = resultado.get("permisos")
+                if m2_permisos is not None:
+                    print(f"  [PolicyEngine] Políticas desde OPA M2 "
+                          f"({len(m2_permisos)} permisos)")
+                    return self._convertir_permisos_m2(m2_permisos, vlan_id)
         except Exception as e:
             print(f"  [PolicyEngine] OPA no disponible: {e}")
 
         # 2. MySQL — fallback si OPA no está corriendo
-        nombre_rol = payload_opa.get("input", {}).get("rol", "")
-        pol_mysql  = self._desde_mysql(nombre_rol)
+        pol_mysql = self._desde_mysql(nombre_rol)
         if pol_mysql is not None:
             return pol_mysql
 
         # 3. Hardcoded por VLAN — siempre disponible
-        vlan_id = payload_opa.get("input", {}).get("vlan_id", 0)
         print(f"  [PolicyEngine] Políticas hardcoded para VLAN {vlan_id}")
         return self._hardcoded(vlan_id)
+
+    def _normalizar_ip(self, ip_raw):
+        """Traduce IPs del diseño M2 (10.0.0.x) a IPs reales VNRT."""
+        return Config.IP_MAPPING_M2.get(ip_raw, ip_raw)
+
+    def _convertir_permisos_m2(self, m2_permisos, vlan_id):
+        """
+        Convierte la respuesta de OPA M2 al formato interno de M6.
+        M2: [{recurso:{ip_dst,puerto,nombre}, tabla:'T2'|'T3', ...}]
+        M6: {permisos:[{ip_dst,puertos:[]}], denegaciones:[{ip_dst,puertos:[]}]}
+        """
+        allow_map = {}
+        for p in m2_permisos:
+            recurso = p.get("recurso", {})
+            ip_raw  = recurso.get("ip_dst", "")
+            puerto  = recurso.get("puerto")
+            if not ip_raw or puerto is None:
+                continue
+            ip_dst = self._normalizar_ip(ip_raw)
+            allow_map.setdefault(ip_dst, set()).add(int(puerto))
+
+        permisos = [{"ip_dst": ip, "puertos": sorted(ps)}
+                    for ip, ps in allow_map.items()]
+
+        # Denegaciones: servidores VNRT conocidos que NO están en permisos
+        all_vnrt  = {Config.SERVER_CURSOS, Config.SERVER_NOTAS}
+        denied_ips = all_vnrt - set(allow_map.keys())
+        denegaciones = [{"ip_dst": ip, "puertos": [80, 443]}
+                        for ip in sorted(denied_ips)]
+
+        return {"permisos": permisos, "denegaciones": denegaciones}
 
     def _desde_mysql(self, nombre_rol):
         """Consulta politicas_rbac en radius_db. Retorna dict o None si falla."""
@@ -429,7 +487,11 @@ class PolicyEngine:
 
             allow_map, deny_map = {}, {}
             for row in rows:
-                ip, puerto, accion = row["ip_dst"], int(row["puerto"]), row["accion"]
+                # Normalizar IP: M2 DB tiene 10.0.0.x, VNRT usa 192.168.100.x
+                ip_raw = row["ip_dst"]
+                ip     = self._normalizar_ip(ip_raw)
+                puerto = int(row["puerto"])
+                accion = row["accion"]
                 (allow_map if accion == "ALLOW" else deny_map).setdefault(
                     ip, []
                 ).append(puerto)
