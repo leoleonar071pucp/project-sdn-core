@@ -6,7 +6,6 @@ Módulo M1 | Grupo 2 - TEL354
 import sys
 import os
 import json
-import getpass
 import time
 import datetime
 import tempfile
@@ -64,11 +63,13 @@ class DatabaseManager:
             return None
         try:
             conexion = mysql.connector.connect(
-                host     = Config.MYSQL_HOST,
-                user     = Config.MYSQL_USER,
-                password = Config.MYSQL_PASS,
-                database = Config.MYSQL_DB,
-                autocommit = False
+            host         = Config.MYSQL_HOST,
+            user         = Config.MYSQL_USER,
+            password     = Config.MYSQL_PASS,
+            database     = Config.MYSQL_DB,
+            autocommit   = False,
+            use_pure     = True,
+            ssl_disabled = True
             )
             return conexion
         except mysql.connector.Error as e:
@@ -545,7 +546,6 @@ class TokenEmitter:
         return None
     
 # Cli - Portal cautivo 
-
 class CaptivePortal:
 
     def __init__(self):
@@ -643,7 +643,6 @@ class CaptivePortal:
                 return
 
     # El Flujo de login 
-
     def login(self):
         """
         Orquesta el flujo completo de autenticación.
@@ -668,7 +667,7 @@ class CaptivePortal:
 
             try:
                 codigo   = input("  Código PUCP : ").strip()
-                password = getpass.getpass("  Contraseña  : ")
+                password = input("  Contraseña  : ").strip()
             except KeyboardInterrupt:
                 print("\n\n  Sesión cancelada.")
                 return
