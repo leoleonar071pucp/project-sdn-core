@@ -90,6 +90,8 @@ ATTRIBUTE Calling-Station-Id 31  string
 ATTRIBUTE Called-Station-Id  30  string
 ATTRIBUTE Framed-IP-Address   8  ipaddr
 ATTRIBUTE Session-Timeout    27  integer
+ATTRIBUTE Acct-Status-Type   40  integer
+ATTRIBUTE Acct-Session-Id    44  string
 """
 class RadiusClient:
 
@@ -174,6 +176,77 @@ class RadiusClient:
         except Exception as e:
             print(f"  [RADIUS] Error: {e}")
             return None, None
+        
+    def accounting_start(self, codigo_pucp, ip_asignada, mac, session_id=None):
+        """
+        Envía Accounting-Start a FreeRADIUS para registrar inicio de sesión.
+        """
+        if not PYRAD_OK:
+            return
+        try:
+            import pyrad.packet as _pkt
+            cliente = pyrad.client.Client(
+                server   = Config.RADIUS_HOST,
+                acctport = 1813,
+                secret   = Config.RADIUS_SECRET,
+                dict     = self._build_dict()
+            )
+            cliente.timeout = 5
+            cliente.retries = 1
+
+            sid = session_id or f"{codigo_pucp}-{int(time.time())}"
+
+            paquete = cliente.CreateAcctPacket(
+                code      = _pkt.AccountingRequest,
+                User_Name = codigo_pucp
+            )
+            paquete["Acct-Status-Type"] = 1          # 1 = Start
+            paquete["Acct-Session-Id"]  = sid
+            paquete["NAS-IP-Address"]   = Config.NAS_IP
+            paquete["Framed-IP-Address"]= ip_asignada
+            paquete["Calling-Station-Id"] = mac
+
+            cliente.SendPacket(paquete)
+            print(f"  [RADIUS] ✓ Accounting-Start enviado (sid={sid})")
+
+        except Exception as e:
+            print(f"  [RADIUS] Accounting-Start error: {e}")
+            
+    def accounting_stop(self, codigo_pucp, ip_asignada, mac, session_id=None):
+        """
+        Envía Accounting-Stop a FreeRADIUS para registrar cierre de sesión.
+        """
+        if not PYRAD_OK:
+            return
+        try:
+            import pyrad.packet as _pkt
+            cliente = pyrad.client.Client(
+                server   = Config.RADIUS_HOST,
+                acctport = 1813,
+                secret   = Config.RADIUS_SECRET,
+                dict     = self._build_dict()
+            )
+            cliente.timeout = 5
+            cliente.retries = 1
+
+            sid = session_id or f"{codigo_pucp}-{int(time.time())}"
+
+            paquete = cliente.CreateAcctPacket(
+                code      = _pkt.AccountingRequest,
+                User_Name = codigo_pucp
+            )
+            paquete["Acct-Status-Type"] = 2          # 2 = Stop
+            paquete["Acct-Session-Id"]  = sid
+            paquete["NAS-IP-Address"]   = Config.NAS_IP
+            paquete["Framed-IP-Address"]= ip_asignada
+            paquete["Calling-Station-Id"] = mac
+
+            cliente.SendPacket(paquete)
+            print(f"  [RADIUS] ✓ Accounting-Stop enviado (sid={sid})")
+
+        except Exception as e:
+            print(f"  [RADIUS] Accounting-Stop error: {e}")
+    
         
         
 # Mapeo de Rol por filter id
@@ -298,6 +371,50 @@ class UserManager:
             conn.commit()
         except Exception:
             conn.rollback()
+        finally:
+            conn.close()
+            
+    # Flujo para el rol Visitante
+    def registrar_visitante(self, correo, password):
+        """Inserta credenciales temporales de visitante en radcheck y radusergroup."""
+        conn = self.db.get_connection()
+        if not conn:
+            return False
+        try:
+            cur = conn.cursor()
+            # Insertar en radcheck
+            cur.execute("""
+                INSERT INTO radcheck (username, attribute, op, value)
+                VALUES (%s, 'Cleartext-Password', ':=', %s)
+            """, (correo, password))
+            # Insertar en radusergroup con rol Visitante
+            cur.execute("""
+                INSERT INTO radusergroup (username, groupname, priority)
+                VALUES (%s, 'Visitante', 1)
+            """, (correo,))
+            conn.commit()
+            return True
+        except Exception as e:
+            conn.rollback()
+            print(f"  [UserManager] Error al registrar visitante: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def eliminar_visitante(self, correo):
+        """Elimina credenciales temporales de visitante al cerrar sesión."""
+        conn = self.db.get_connection()
+        if not conn:
+            return
+        try:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM radcheck WHERE username = %s", (correo,))
+            cur.execute("DELETE FROM radusergroup WHERE username = %s", (correo,))
+            conn.commit()
+            print(f"  [DB] ✓ Credenciales visitante eliminadas ({correo})")
+        except Exception as e:
+            conn.rollback()
+            print(f"  [UserManager] Error al eliminar visitante: {e}")
         finally:
             conn.close()
             
@@ -536,53 +653,66 @@ class SessionManager:
 
 class TokenEmitter:
 
-    def emit(self, codigo_pucp, nombre_rol, vlan_id, ip_asignada):
-        """
-        Envía token a M6 con los datos mínimos que M1 conoce.
-        M6 se encarga de consultar ONOS para obtener mac/dpid/port.
+    def _llamar_m6(self, endpoint, body):
+        """Llamada genérica a M6 vía urllib."""
+        try:
+            import urllib.request as _ul
+            import json as _js
+            m6_base = Config.M6_URL.rsplit("/m6/", 1)[0]
+            _body = _js.dumps(body).encode("utf-8")
+            _req  = _ul.Request(
+                f"{m6_base}{endpoint}", data=_body,
+                headers={"Content-Type": "application/json"}
+            )
+            with _ul.urlopen(_req, timeout=12) as _resp:
+                if _resp.status == 200:
+                    return _js.loads(_resp.read())
+        except Exception as e:
+            print(f"  [M1→M6] Error en {endpoint}: {e}")
+        return None
 
-        Retorna dict con {mac, switch_dpid, in_port} si M6 responde OK.
-        Retorna None si M6 no está disponible (modo simulado).
+    def resolver_host(self, ip_asignada):
+        """
+        Primera llamada a M6: obtener {mac, switch_dpid, in_port} por IP.
+        M6 consulta ONOS host store. No instala flows.
+        """
+        resultado = self._llamar_m6("/m6/resolver_host",
+                                    {"ip_asignada": ip_asignada})
+        if resultado:
+            print(f"  [M1→M6] ✓ Host resuelto — mac={resultado.get('mac')}")
+            return resultado
+
+        # Modo simulado
+        print("  [M1→M6] M6 no disponible — host no resuelto")
+        return None
+
+    def emitir_token(self, codigo_pucp, nombre_rol, vlan_id,
+                     ip_asignada, mac, switch_dpid, in_port):
+        """
+        Segunda llamada a M6: enviar token completo para instalar flows.
+        Solo se llama DESPUÉS de registrar sesión y binding en DB.
         """
         token = {
             "codigo_pucp": codigo_pucp,
             "nombre_rol":  nombre_rol,
             "vlan_id":     vlan_id,
-            "ip_asignada": ip_asignada
+            "ip_asignada": ip_asignada,
+            "mac":         mac,
+            "switch_dpid": switch_dpid,
+            "in_port":     in_port
         }
+        resultado = self._llamar_m6("/m6/token_rol", token)
+        if resultado:
+            print(f"  [M1→M6] ✓ Token emitido — flows instalados en ONOS")
+            return True
 
-        # Contactar M6 (Mark Valencia) — usa urllib (stdlib) para evitar
-        # segfault de requests/cryptography en Python 3.6 con swap lleno
-        if hasattr(Config, 'M6_URL') and Config.M6_URL:
-            try:
-                import urllib.request as _ul
-                import json as _js
-                _body = _js.dumps(token).encode('utf-8')
-                _req  = _ul.Request(
-                    Config.M6_URL, data=_body,
-                    headers={'Content-Type': 'application/json'}
-                )
-                with _ul.urlopen(_req, timeout=12) as _resp:
-                    if _resp.status == 200:
-                        respuesta = _js.loads(_resp.read())
-                        print(f"  [M1→M6] ✓ Token enviado — "
-                              f"mac={respuesta.get('mac')}")
-                        return respuesta  # {mac, switch_dpid, in_port}
-                    else:
-                        print(f"  [M1→M6] M6 respondió HTTP {_resp.status}")
-            except Exception as e:
-                print(f"  [M1→M6] M6 no disponible: {e}")
-
-        # Modo simulado cuando M6 no responde
+        # Modo simulado
         print(f"\n  [M1→M6] Token de Rol (M6 no disponible — modo simulado):")
         print("  " + Config.SEP2)
         for k, v in token.items():
             print(f"    {k:<14}: {v}")
         print("  " + Config.SEP2)
-        print("  M6 instalará SET_FIELD vlan_vid en ONOS.\n")
-        # Retornamos None para indicar que M6 no respondió
-        # SessionManager usará valores por defecto
-        return None
+        return False
     
 # Cli - Portal cautivo 
 class CaptivePortal:
@@ -621,10 +751,128 @@ class CaptivePortal:
         print(f"  FreeRADIUS : {Config.RADIUS_HOST}:{Config.RADIUS_PORT}")
         print(Config.SEP2)
         print("  [1] Iniciar sesión")
-        print("  [2] Soy visitante  (no implementado)")
+        print("  [2] Soy visitante")
         print("  [3] Salir")
         print(Config.SEP)
 
+    def _flujo_visitante(self):
+        """Flujo completo para usuarios visitantes."""
+        print("\n")
+        print(Config.SEP)
+        print("        ACCESO VISITANTE — RED PUCP")
+        print(Config.SEP)
+        print("  Acceso temporal de 30 minutos.")
+        print("  Solo disponible: internet externo :D")
+        print(Config.SEP2)
+
+        # 1. Obtener IP del cliente
+        ip_asignada = self.get_client_ip()
+        if not ip_asignada:
+            ip_asignada = input("  IP del cliente (prueba local): ").strip()
+
+        print(f"  IP actual : {ip_asignada}  (VLAN {Config.VLAN_CUARENTENA} — cuarentena)")
+        print(Config.SEP2)
+
+        # 2. Solicitar correo y contraseña
+        try:
+            correo   = input("  Correo    : ").strip()
+            password = input("  Contraseña: ").strip()
+        except KeyboardInterrupt:
+            print("\n\n  Cancelado.")
+            return
+
+        if not correo or not password:
+            print("  [!] Ingresa correo y contraseña.")
+            input("  Presiona Enter para volver...")
+            return
+
+        # 3. Registrar credenciales temporales en DB
+        print("\n  Registrando acceso visitante...")
+        ok = self.users.registrar_visitante(correo, password)
+        if not ok:
+            print("  [ERROR] No se pudo registrar el visitante.")
+            input("  Presiona Enter para volver...")
+            return
+
+        # 4. Autenticar con FreeRADIUS
+        print("  Autenticando", end="", flush=True)
+        for _ in range(3):
+            time.sleep(0.3)
+            print(".", end="", flush=True)
+        print()
+
+        nombre_rol, _ = self.radius.authenticate(correo, password, ip_asignada)
+
+        if nombre_rol is None:
+            print("  [ERROR] FreeRADIUS rechazó las credenciales.")
+            self.users.eliminar_visitante(correo)
+            input("  Presiona Enter para volver...")
+            return
+
+        vlan_id = self.roles.get_vlan_id(nombre_rol)
+        if vlan_id is None:
+            print(f"  [ERROR] Rol '{nombre_rol}' no reconocido.")
+            self.users.eliminar_visitante(correo)
+            input("  Presiona Enter para volver...")
+            return
+
+        # 5. Resolver host vía M6
+        host = self.tokens.resolver_host(ip_asignada)
+        if not host:
+            print("  [ERROR] No se pudo resolver el host en ONOS.")
+            self.users.eliminar_visitante(correo)
+            input("  Presiona Enter para volver...")
+            return
+
+        mac         = host["mac"]
+        switch_dpid = host["switch_dpid"]
+        in_port     = host["in_port"]
+
+        # 6. Anti-spoofing
+        libre, motivo = self.sessions.verify_antispoofing(ip_asignada, mac)
+        if not libre:
+            print(f"\n  Anti-spoofing: {motivo}")
+            self.users.eliminar_visitante(correo)
+            input("  Presiona Enter para volver...")
+            return
+
+        # 7. Registrar sesión — id_usuario=None para visitantes
+        # Visitantes no tienen id_usuario en tabla usuarios
+        # Se usa un id especial: 0
+        id_sesion = self.sessions.register_session(
+            0, mac, ip_asignada,
+            vlan_id, nombre_rol, switch_dpid, in_port
+        )
+        if id_sesion is None:
+            print("  [ERROR] No se pudo registrar la sesión.")
+            self.users.eliminar_visitante(correo)
+            input("  Presiona Enter para volver...")
+            return
+
+        # 8. Binding IP+MAC
+        self.sessions.create_binding(ip_asignada, mac, 0, switch_dpid, in_port)
+
+        # 9. Accounting-Start
+        self.radius.accounting_start(correo, ip_asignada, mac)
+
+        # 10. Emitir token a M6
+        self.tokens.emitir_token(
+            correo, nombre_rol, vlan_id,
+            ip_asignada, mac, switch_dpid, in_port
+        )
+
+        print(f"  ✓ Sesión #{id_sesion} registrada — 30 minutos de acceso")
+
+        # 11. Menú sesión visitante
+        self._mostrar_menu_sesion_visitante(
+            correo, nombre_rol, vlan_id,
+            ip_asignada, mac
+        )
+
+        # 12. Al salir — limpiar credenciales
+        self.users.eliminar_visitante(correo)
+    
+    
     def _mostrar_recursos(self, nombre_rol, vlan_id):
         print("\n")
         print(Config.SEP)
@@ -672,6 +920,7 @@ class CaptivePortal:
                 print("  Cerrando sesión...")
                 sesion = self.sessions.close_session(mac, id_usuario)
                 if sesion:
+                    self.radius.accounting_stop(codigo_pucp, ip_asignada, mac)
                     print(f"  ✓ Sesión cerrada correctamente")
                     print(f"  ✓ Registrada en historial_sesiones")
                     print(f"  ✓ Binding IP+MAC eliminado")
@@ -681,6 +930,55 @@ class CaptivePortal:
                 input("  Presiona Enter para volver al menú principal...")
                 return
 
+
+
+    def _mostrar_menu_sesion_visitante(self, correo, nombre_rol, vlan_id, ip_asignada, mac):
+        """Menú simple para sesión visitante."""
+        inicio = datetime.datetime.now()
+        timeout = datetime.timedelta(minutes=30)
+
+        while True:
+            ahora    = datetime.datetime.now()
+            transcurrido = ahora - inicio
+            restante = timeout - transcurrido
+
+            if restante.total_seconds() <= 0:
+                print("\n  ⚠  Sesión expirada (30 minutos).")
+                self.sessions.close_session(mac, 0)
+                self.radius.accounting_stop(correo, ip_asignada, mac)
+                input("  Presiona Enter para volver...")
+                return
+
+            mins = int(restante.total_seconds() // 60)
+            segs = int(restante.total_seconds() % 60)
+
+            print("\n")
+            print(Config.SEP)
+            print("  ✓  ACCESO VISITANTE — Sesión activa")
+            print(Config.SEP)
+            print(f"  Correo      : {correo}")
+            print(f"  Rol         : {nombre_rol}")
+            print(f"  VLAN        : {vlan_id}")
+            print(f"  IP asignada : {ip_asignada}")
+            print(f"  Tiempo rest.: {mins:02d}:{segs:02d}")
+            print(Config.SEP2)
+            print("  [1] Cerrar sesión")
+            print(Config.SEP)
+
+            opcion = input("  Opción: ").strip()
+
+            if opcion == "1":
+                print("\n")
+                print(Config.SEP)
+                print("  Cerrando sesión visitante...")
+                self.sessions.close_session(mac, 0)
+                self.radius.accounting_stop(correo, ip_asignada, mac)
+                print("  ✓ Sesión cerrada")
+                print("  ✓ Credenciales eliminadas")
+                print(Config.SEP)
+                input("  Presiona Enter para volver...")
+                return
+    
     # El Flujo de login 
     def login(self):
         """
@@ -697,7 +995,7 @@ class CaptivePortal:
             ).strip()
 
         print(Config.SEP)
-        print(f"  IP actual   : {ip_asignada}  (VLAN 90 — cuarentena)")
+        print(f"  IP actual   : {ip_asignada}  (VLAN {Config.VLAN_CUARENTENA} — cuarentena)")
         print("  Ingresa tus credenciales PUCP para acceder a la red")
         print(Config.SEP2)
 
@@ -737,7 +1035,6 @@ class CaptivePortal:
 
             # Si se recive un  access accept
             if nombre_rol is not None:
-
                 # 4. Traducir rol → vlan_id
                 vlan_id = self.roles.get_vlan_id(nombre_rol)
                 if vlan_id is None:
@@ -745,79 +1042,60 @@ class CaptivePortal:
                     input("  Presiona Enter para volver...")
                     return
 
-                # 5. Enviar token a M6 (MARK)
-                #    M1 solo conoce: codigo_pucp, nombre_rol, vlan_id, ip_asignada
-                #    M6 debe: consultar ONOS con ip_asignada → obtener mac/dpid/port
-                #             instalar SET_FIELD vlan_vid en ONOS
-                #             devolver {mac, switch_dpid, in_port} a M1
-                respuesta_m6 = self.tokens.emit(
-                    codigo, nombre_rol, vlan_id, ip_asignada
-                )
-
-                if respuesta_m6:
-                    mac         = respuesta_m6["mac"]
-                    switch_dpid = respuesta_m6["switch_dpid"]
-                    in_port     = respuesta_m6["in_port"]
-                else:
-                    # Valores demo del slice VNRT real (H1 en SW2 puerto 2)
-                    # Reemplazar por respuesta_m6 cuando M6 esté integrado
-                    print("  [AVISO] M6 no disponible — usando valores demo del slice")
-                    mac         = "FA:16:3E:53:F8:E8"   # MAC real de H1
-                    switch_dpid = "of:000072e0807e854c"  # SW2 real
-                    in_port     = 2                       # Puerto de H1 en SW2
-
-                # 7. Obtener id_usuario
+                # 5. Obtener id_usuario
                 id_usuario = self.users.get_id(codigo)
                 if not id_usuario:
                     print("  [ERROR] Usuario no encontrado en DB.")
                     input("  Presiona Enter para volver...")
                     return
 
-                # 8. Verificar anti-spoofing
-                libre, motivo = self.sessions.verify_antispoofing(
-                    ip_asignada, mac
-                )
-                if not libre:
-                    print(f"\n Anti-spoofing: {motivo}")
-                    input("Presiona Enter para volver...")
+                # 6. Resolver host vía M6 (primera llamada — solo consulta ONOS)
+                host = self.tokens.resolver_host(ip_asignada)
+                if not host:
+                    print("  [ERROR] No se pudo resolver el host en ONOS.")
+                    input("  Presiona Enter para volver...")
                     return
 
-                # 9. Registrar sesión en sesiones_activas
+                mac         = host["mac"]
+                switch_dpid = host["switch_dpid"]
+                in_port     = host["in_port"]
+
+                # 7. Verificar anti-spoofing
+                libre, motivo = self.sessions.verify_antispoofing(ip_asignada, mac)
+                if not libre:
+                    print(f"\n  Anti-spoofing: {motivo}")
+                    input("  Presiona Enter para volver...")
+                    return
+
+                # 8. Registrar sesión en sesiones_activas
                 id_sesion = self.sessions.register_session(
                     id_usuario, mac, ip_asignada,
-                    vlan_id, nombre_rol,
-                    switch_dpid, in_port
+                    vlan_id, nombre_rol, switch_dpid, in_port
                 )
                 if id_sesion is None:
-                    # Limpiar flows de ONOS ya instalados por M6 en este intento
-                    if respuesta_m6:
-                        try:
-                            import urllib.request as _ul2
-                            import json as _js2
-                            m6_base = Config.M6_URL.rsplit("/m6/", 1)[0]
-                            _body2 = _js2.dumps({"mac": mac}).encode('utf-8')
-                            _req2  = _ul2.Request(
-                                f"{m6_base}/m6/cerrar_sesion", data=_body2,
-                                headers={'Content-Type': 'application/json'}
-                            )
-                            _ul2.urlopen(_req2, timeout=3)
-                        except Exception:
-                            pass
                     print("  Error al registrar sesión.")
                     input("  Presiona Enter para volver...")
                     return
 
-                # 10. Crear binding IP+MAC
+                # 9. Crear binding IP+MAC
                 self.sessions.create_binding(
-                    ip_asignada, mac, id_usuario,
-                    switch_dpid, in_port
+                    ip_asignada, mac, id_usuario, switch_dpid, in_port
                 )
 
-                # 11. Resetear contador de intentos
+                # 10. Resetear contador de intentos
                 self.users.reset_failed_attempts(codigo)
+                
+                self.radius.accounting_start(codigo, ip_asignada, mac)
 
-                print(f"Sesión #{id_sesion} registrada")
-                print(f"Binding IP+MAC creado")
+
+                # 11. Emitir token completo a M6 (segunda llamada — instala flows en ONOS)
+                self.tokens.emitir_token(
+                    codigo, nombre_rol, vlan_id,
+                    ip_asignada, mac, switch_dpid, in_port
+                )
+
+                print(f"  Sesión #{id_sesion} registrada")
+                print(f"  Binding IP+MAC creado")
 
                 # 12. Menú de sesión activa
                 self._mostrar_menu_sesion(
@@ -854,10 +1132,7 @@ class CaptivePortal:
                 self.login()
 
             elif opcion == "2":
-                print(Config.SEP)
-                print("  Flujo visitante — no implementado aún.")
-                print(Config.SEP)
-                input("  Presiona Enter para volver...")
+                self._flujo_visitante()
 
             elif opcion in ("3", "q", "salir"):
                 print("\n  Saliendo del portal.\n")

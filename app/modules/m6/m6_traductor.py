@@ -78,7 +78,7 @@ class Config:
     SERVER_NOTAS  = "192.168.100.201"  # H4 — servidor notas  (IP fija)
 
     # DPIDs reales del slice VNRT
-    SW1 = "of:00005ec76ec6114c"   # troncal
+    SW1 = "of:00005ec76ec6114c"   # core
     SW2 = "of:000072e0807e854c"   # acceso hosts
     SW3 = "of:0000f220f9454c4e"   # acceso servidores
 
@@ -90,12 +90,18 @@ class Config:
 
     # Fallback hosts: cuando ONOS no tiene el host (IP asignada manualmente)
     HOSTS_VNRT = {
-        "192.168.100.41": {
-            "mac":         "FA:16:3E:53:F8:E8",
+        "192.168.100.23": {
+            "mac":         "FA:16:3E:14:78:63",
             "switch_dpid": "of:000072e0807e854c",
             "in_port":     2
+        },
+        "192.168.100.100": {
+            "mac":         "FA:16:3E:E9:BF:92",
+            "switch_dpid": "of:000072e0807e854c",
+            "in_port":     3
         }
     }
+
 
     # Prioridades OpenFlow (acordadas en diseño de arquitectura)
     PRIO_VLAN_PUSH  = 10      # T1: sin tag → PUSH VLAN 90
@@ -574,10 +580,16 @@ class PolicyEngine:
                 ],
                 "denegaciones": []
             }
-        else:                              # Visitante
+        else:   # Visitante
+            # TODO: Visitante debería tener acceso a internet externo (VLAN 100 → gateway)
+            # Requiere configurar NAT en el controller (192.168.201.210 vía ens3)
+            # que está fuera del plano SDN. Por ahora se permite acceso al portal únicamente.
             return {
-                "permisos":    [{"ip_dst": cursos, "puertos": [80]}],
-                "denegaciones":[]
+                "permisos":    [],
+                "denegaciones": [
+                    {"ip_dst": Config.SERVER_CURSOS, "puertos": [80, 443]},
+                    {"ip_dst": Config.SERVER_NOTAS,  "puertos": [80, 443]}
+                ]
             }
 
 
@@ -884,34 +896,26 @@ class M6Translator:
     def procesar_token_rol(self, token):
         """
         Punto de entrada desde M1 tras autenticación exitosa.
-        token = {codigo_pucp, nombre_rol, vlan_id, ip_asignada}
-        Retorna {mac, switch_dpid, in_port} para que M1 registre la sesión.
+        token = {codigo_pucp, nombre_rol, vlan_id, ip_asignada,
+                mac, switch_dpid, in_port}
+        M1 ya resolvió el host vía /m6/resolver_host antes de llamar aquí.
+        Instala flows en ONOS y retorna {"ok": True}.
         """
         codigo_pucp = token["codigo_pucp"]
         nombre_rol  = token["nombre_rol"]
         vlan_id     = int(token["vlan_id"])
         ip_asignada = token["ip_asignada"]
+        mac         = token["mac"]
+        switch_dpid = token["switch_dpid"]
+        in_port     = int(token["in_port"])
 
+        nombre_sw = Config.SWITCH_NOMBRES.get(switch_dpid, switch_dpid[-8:])
         print(f"\n[M6] ── Token de M1 ──────────────────────────────")
         print(f"  usuario={codigo_pucp}  rol={nombre_rol}  "
-              f"vlan={vlan_id}  ip={ip_asignada}")
-
-        # 1. Resolver host: ONOS GET /hosts → fallback VNRT
-        host = self.onos.get_host_by_ip(ip_asignada)
-        if not host:
-            self.logger.log({
-                "modulo": "M6", "evento": "error_host_no_encontrado",
-                "ip": ip_asignada, "usuario": codigo_pucp
-            })
-            return None
-
-        mac         = host["mac"]
-        switch_dpid = host["switch_dpid"]
-        in_port     = host["in_port"]
-        nombre_sw   = Config.SWITCH_NOMBRES.get(switch_dpid, switch_dpid)
+            f"vlan={vlan_id}  ip={ip_asignada}")
         print(f"  host: mac={mac}  switch={nombre_sw}  puerto={in_port}")
 
-        # 2. T1 SET_FIELD: VLAN 90 → vlan_id del rol (tabla 1, per-sesión)
+        # 1. T1 SET_FIELD: VLAN 90 → vlan_id del rol
         print(f"  [T1] SET_FIELD VLAN {Config.VLAN_CUARENTENA}→{vlan_id}...")
         self._instalar_y_cachear(
             switch_dpid,
@@ -919,8 +923,7 @@ class M6Translator:
             mac
         )
 
-        # T0 return flow: respuestas de servidores → host (instalado per-sesión)
-        # IN_PORT=1 = uplink de SW1; ETH_DST=MAC del host; OUTPUT=puerto del host
+        # T0 return flow: respuestas de servidores → host
         print(f"  [T0] Return flow → puerto {in_port}...")
         self._instalar_y_cachear(
             switch_dpid,
@@ -928,7 +931,7 @@ class M6Translator:
             mac
         )
 
-        # 3. Obtener políticas (OPA → MySQL → hardcoded)
+        # 2. Obtener políticas (OPA → MySQL → hardcoded)
         payload_opa = {
             "input": {
                 "codigo_pucp": codigo_pucp,
@@ -941,17 +944,16 @@ class M6Translator:
         }
         politicas = self.policies.get_policies(payload_opa)
 
-        # 4. Instalar flows de política
+        # 3. Instalar flows de política
         n_allow, n_deny = 0, 0
         print(f"  Instalando enforcement...")
 
         for permiso in politicas.get("permisos", []):
             ip_dst = permiso["ip_dst"]
-            # T0 ALLOW por MAC: enforcement real en VNRT (tabla 0, prio 35000)
             self._instalar_y_cachear(
                 switch_dpid,
                 self.builder.t0_allow_usuario(
-                    switch_dpid, mac, ip_dst, out_port=1  # puerto 1 = uplink→SW1
+                    switch_dpid, mac, ip_dst, out_port=1
                 ),
                 mac
             )
@@ -959,13 +961,11 @@ class M6Translator:
 
         for denegacion in politicas.get("denegaciones", []):
             ip_dst = denegacion["ip_dst"]
-            # T3 DENY arquitectural (tabla 3) — visible en ONOS
             self._instalar_y_cachear(
                 switch_dpid,
                 self.builder.t3_deny_sesion(switch_dpid, mac, ip_asignada, ip_dst),
                 mac
             )
-            # T0 DENY por MAC: enforcement real en VNRT (tabla 0, prio 35000)
             self._instalar_y_cachear(
                 switch_dpid,
                 self.builder.t0_deny_usuario(switch_dpid, mac, ip_dst),
@@ -975,25 +975,16 @@ class M6Translator:
 
         n_total = len(self.flows_por_sesion.get(mac, []))
         print(f"  ✓ Sesión activada — {n_total} flows  "
-              f"(T1:1  T0-ALLOW:{n_allow}  T3+T0-DENY:{n_deny*2})")
+            f"(T1:1  T0-ALLOW:{n_allow}  T3+T0-DENY:{n_deny*2})")
 
         self.logger.log({
-            "modulo":    "M6",
-            "evento":    "sesion_activada",
-            "usuario":   codigo_pucp,
-            "rol":       nombre_rol,
-            "vlan":      vlan_id,
-            "mac":       mac,
-            "switch":    switch_dpid,
-            "puerto":    in_port,
-            "n_flows":   n_total
+            "modulo":  "M6", "evento": "sesion_activada",
+            "usuario": codigo_pucp, "rol": nombre_rol,
+            "vlan":    vlan_id, "mac": mac,
+            "switch":  switch_dpid, "puerto": in_port,
+            "n_flows": n_total
         })
-
-        return {
-            "mac":         mac,
-            "switch_dpid": switch_dpid,
-            "in_port":     in_port
-        }
+        return {"ok": True}
 
     # ── Cierre de sesión ──────────────────────────────────────────────────────
 
@@ -1046,14 +1037,35 @@ class M6Translator:
 app = Flask(__name__)
 m6  = M6Translator()
 
+# se añade un nuevo end point  para conocer el dpid, port y mac del user antes de mandar el token 
+# a m6 y valisar sus campos de sesiones activas y ip_mac binding
+@app.route("/m6/resolver_host", methods=["POST"])
+def endpoint_resolver_host():
+    """
+    M1 llama aquí ANTES de registrar la sesión en DB.
+    Solo consulta ONOS y devuelve {mac, switch_dpid, in_port}.
+    No instala ningún flow.
+    """
+    data = request.json or {}
+    ip_asignada = data.get("ip_asignada")
+    if not ip_asignada:
+        return jsonify({"error": "falta campo: ip_asignada"}), 400
+    host = m6.onos.get_host_by_ip(ip_asignada)
+    if not host:
+        return jsonify({"error": f"host {ip_asignada} no encontrado"}), 404
+    return jsonify(host), 200
 
 @app.route("/m6/token_rol", methods=["POST"])
 def endpoint_token_rol():
-    """M1 llama aquí después de autenticar exitosamente al usuario."""
+    """
+    M1 llama aquí DESPUÉS de registrar la sesión en DB.
+    Recibe token completo e instala flows en ONOS.
+    """
     token = request.json
     if not token:
         return jsonify({"error": "body vacío"}), 400
-    for campo in ("codigo_pucp", "nombre_rol", "vlan_id", "ip_asignada"):
+    for campo in ("codigo_pucp", "nombre_rol", "vlan_id",
+                  "ip_asignada", "mac", "switch_dpid", "in_port"):
         if campo not in token:
             return jsonify({"error": f"falta campo: {campo}"}), 400
     resultado = m6.procesar_token_rol(token)
