@@ -23,7 +23,8 @@ services:
     image: openpolicyagent/opa:0.68.0
     container_name: m2-opa
     ports:
-      - "8181:8181"
+      - "8182:8181" # Anteriormente estaba 8181:8181, 
+                    # el cambio es para evitar conflicto de puerto con ONOS en la misma vm
     volumes:
       - ./opa/policy.rego:/workspace/policy.rego:ro
     command: run --server /workspace/policy.rego

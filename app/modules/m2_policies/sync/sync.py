@@ -64,8 +64,7 @@ def fetch_resources():
                 r.nombre_recurso AS nombre,
                 r.ip_dst,
                 r.puerto,
-                r.protocolo,
-                r.ancho_banda_default
+                r.protocolo
             FROM recursos r
         """)
         recursos_rows = cursor.fetchall()
@@ -96,8 +95,7 @@ def fetch_resources():
                 "puerto": r["puerto"],
                 "protocolo": r["protocolo"],
                 "condiciones": cond_dict.get(rid, []),
-                "combinacion": "or",
-                "ancho_banda_default": r["ancho_banda_default"]
+                "combinacion": "or"
             }
         return recursos
     finally:
@@ -110,12 +108,10 @@ def fetch_exceptions():
         cursor = conn.cursor(pymysql.cursors.DictCursor)
         cursor.execute("""
             SELECT
-                u.codigo_pucp AS usuario,
+                u.codigo_pucp   AS usuario,
                 pt.id_recurso,
                 r.nombre_recurso AS recurso,
-                pt.allow,
-                pt.razon,
-                pt.ancho_banda,
+                pt.accion,
                 pt.expiration
             FROM politicas_temporales pt
             JOIN usuarios u ON pt.id_usuario = u.id_usuario
@@ -127,25 +123,21 @@ def fetch_exceptions():
 
         excepciones_por_usuario = {}
         for row in rows:
-            usuario = row["usuario"]
+            usuario  = row["usuario"]
             ex_entry = {
                 "recurso_id": str(row["id_recurso"]),
-                "recurso": row["recurso"],
-                "allow": bool(row["allow"])
+                "recurso":    row["recurso"],
+                "allow":      row["accion"] == "ALLOW"
             }
-            if row["razon"]:
-                ex_entry["razon"] = row["razon"]
-            if row["ancho_banda"]:
-                ex_entry["ancho_banda"] = row["ancho_banda"]
             if row["expiration"]:
-                ex_entry["expires_at"] = row["expiration"].strftime("%Y-%m-%dT%H:%M:%SZ")
-            
+                ex_entry["expires_at"] = row["expiration"].strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
             excepciones_por_usuario.setdefault(usuario, []).append(ex_entry)
 
         return excepciones_por_usuario
     finally:
         conn.close()
-
 
 def push_resources(data):
     r = session.put(f"{OPA_URL}/v1/data/pool/recursos", json=data, timeout=10)
