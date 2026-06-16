@@ -24,22 +24,18 @@ excepcion_vigente(ex) if {
 
 _raw_exceptions := object.get(excepciones, input.usuario, [])
 
-# rids con deny explícito (set, para lookup O(1))
 _denied_rids contains rid if {
     some ex in _raw_exceptions
     ex.allow == false
     rid := ex.recurso_id
 }
 
-# Mapa deny: recurso_id → excepción
 user_deny_map[rid] := ex if {
     some ex in _raw_exceptions
     ex.allow == false
     rid := ex.recurso_id
 }
 
-# Mapa allow vigente: recurso_id → excepción
-# Solo entra si NO existe deny para ese mismo rid
 user_allow_map[rid] := ex if {
     some ex in _raw_exceptions
     ex.allow == true
@@ -48,9 +44,6 @@ user_allow_map[rid] := ex if {
     not _denied_rids[rid]
 }
 
-# Vista unificada: deny gana sobre allow.
-# Se expresa como dos reglas independientes en vez de else,
-# porque OPA no admite else en object rules con variable en head.
 user_exceptions_map[rid] := ex if {
     ex := user_deny_map[rid]
 }
@@ -59,7 +52,6 @@ user_exceptions_map[rid] := ex if {
     ex := user_allow_map[rid]
 }
 
-# Sets derivados para uso en construir_permiso
 denegados contains rid if {
     user_exceptions_map[rid].allow == false
 }
@@ -95,9 +87,12 @@ result := {
     ],
 }
 
+# FIX 1: eliminar la doble evaluación de permisivos[rid].
+# ex := permisivos[rid] ya falla si no existe — la guarda
+# redundante "permisivos[rid]" antes de la asignación era
+# un lookup extra innecesario.
 construir_permiso(rid, r) := permiso if {
     not denegados[rid]
-    permisivos[rid]
     ex := permisivos[rid]
     permiso := {
         "recurso":     recurso_base(r),
@@ -108,7 +103,7 @@ construir_permiso(rid, r) := permiso if {
 } else := permiso if {
     not denegados[rid]
     not permisivos[rid]
-    cumple_condiciones(r.condiciones, r.combinacion)
+    cumple_grupos(r.grupos)
     permiso := {
         "recurso":     recurso_base(r),
         "tabla":       "T2",
@@ -120,7 +115,8 @@ construir_permiso(rid, r) := permiso if {
 recurso_base(r) := {
     "id":        r.id,
     "nombre":    r.nombre,
-    "ip_dst":    r.ip_dst,
+    "ip_srv":    r.ip_servidor,
+    "mac_srv":   r.mac_servidor,
     "puerto":    r.puerto,
     "protocolo": r.protocolo,
 }
@@ -135,6 +131,7 @@ allow_resource := decision if {
     ex  := user_exceptions_map[rid]
     decision := {
         "allow":       ex.allow,
+        "recurso":     recurso_base(r),
         "ancho_banda": object.get(ex, "ancho_banda", r.ancho_banda_default),
         "expires_at":  object.get(ex, "expires_at", null),
         "razon":       "excepcion",
@@ -143,7 +140,7 @@ allow_resource := decision if {
     rid := resolve_rid
     r   := recursos[rid]
     not user_exceptions_map[rid]
-    cumple_condiciones(r.condiciones, r.combinacion)
+    cumple_grupos(r.grupos)
     decision := {
         "allow":       true,
         "ancho_banda": r.ancho_banda_default,
@@ -152,10 +149,9 @@ allow_resource := decision if {
     }
 } else := decision if {
     rid := resolve_rid
-    recursos[rid]
+    r   := recursos[rid]
     not user_exceptions_map[rid]
-    r := recursos[rid]
-    not cumple_condiciones(r.condiciones, r.combinacion)
+    not cumple_grupos(r.grupos)
     decision := {
         "allow": false,
         "razon": "denegado_por_politica",
@@ -163,30 +159,49 @@ allow_resource := decision if {
 }
 
 # ─────────────────────────────────────────────────────────────
-# FUNCIONES AUXILIARES
+# LÓGICA DNF
+# OR entre grupos, AND dentro de cada grupo
 # ─────────────────────────────────────────────────────────────
-
-cumple_condiciones(condiciones, "or") if {
-    some cond in condiciones
-    evaluar_condicion(cond)
+cumple_grupos(grupos) if {
+    some grupo in grupos
+    grupo_cumple(grupo)
 }
 
-# Recursos sin condiciones, se asume que se cumplen (caso base).
-#cumple_condiciones([], "and") if { true }
-#cumple_condiciones([], "or") if { true }
-
-cumple_condiciones(condiciones, "and") if {
-    count(condiciones) > 0
-    every cond in condiciones {
+# FIX 2: count(grupo) > 0 evita que un grupo vacío [] siempre
+# cumpla (every sobre conjunto vacío es true en Rego).
+grupo_cumple(grupo) if {
+    count(grupo) > 0
+    every cond in grupo {
         evaluar_condicion(cond)
     }
 }
 
+# ─────────────────────────────────────────────────────────────
+# CONDICIONES
+# ─────────────────────────────────────────────────────────────
+
+# Rol específico
 evaluar_condicion(cond) if {
     cond.tipo == "rol"
+    cond.valor != "any"
     cond.valor in input.roles
 }
 
+# FIX 3 / NUEVO: rol "any" — se cumple si el usuario tiene
+# al menos un rol. Permite expresar "cualquier rol válido"
+# dentro de un grupo AND sin importar cuál sea.
+# Ejemplo: [ {tipo:rol, valor:Docente}, {tipo:rol, valor:any} ]
+# → usuario debe ser Docente Y tener al menos un rol (siempre
+#   true para cualquier docente con roles), lo que equivale
+#   a "solo Docente" en la práctica si se combina bien.
+# Más útil: [ {tipo:rol, valor:any} ] solo → acceso universal.
+evaluar_condicion(cond) if {
+    cond.tipo == "rol"
+    cond.valor == "any"
+    count(input.roles) > 0
+}
+
+# Facultad
 evaluar_condicion(cond) if {
     cond.tipo == "facultad"
     input.facultad == cond.valor

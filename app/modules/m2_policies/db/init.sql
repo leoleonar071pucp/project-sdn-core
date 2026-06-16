@@ -44,15 +44,12 @@ CREATE TABLE IF NOT EXISTS `lista_negra_t0` (
 -- Define los roles del sistema.
 -- vlan_id: tag que M6 imprime en el puerto de ingreso del cliente
 --          al autenticarse (SET_FIELD vlan_vid en ONOS).
--- cidr_asignado: referencia informativa — ya NO identifica al rol
---                en el pipeline OpenFlow (ese rol lo hace vlan_id).
 -- FreeRADIUS devuelve el nombre_rol en el atributo Filter-Id.
 -- M1 traduce nombre_rol → vlan_id con el diccionario VLAN_POR_ROL.
 -- ============================================================
 CREATE TABLE IF NOT EXISTS `roles_facultad` (
     `id_rol`        INT          NOT NULL AUTO_INCREMENT,
     `nombre_rol`    VARCHAR(50)  NOT NULL,
-    `cidr_asignado` VARCHAR(18)  NOT NULL COMMENT 'Informativo — pool DHCP compartido 192.168.100.0/24',
     `vlan_id`       INT          NOT NULL COMMENT 'VLAN tag que M6 instala en el switch post-autenticacion',
     `descripcion`   VARCHAR(100) NULL DEFAULT NULL,
     PRIMARY KEY (`id_rol`),
@@ -63,14 +60,14 @@ CREATE TABLE IF NOT EXISTS `roles_facultad` (
   COLLATE=utf8mb4_unicode_ci;
 
 --                            nombre_rol cidr (informativo)  vlan_id  descripcion
-INSERT INTO `roles_facultad` (nombre_rol, cidr_asignado, vlan_id, descripcion) VALUES
-('Cuarentena',             '192.168.100.0/24',  90,  'Estado inicial — solo DHCP y portal cautivo'),
-('Visitante',              '192.168.100.0/24', 100,  'Acceso externo limitado via Gateway'),
-('Estudiante_Telecom',     '192.168.100.0/24', 210,  'Acceso a cursos Telecomunicaciones'),
-('Estudiante_Informatica', '192.168.100.0/24', 220,  'Acceso a cursos Informatica'),
-('Estudiante_Electronica', '192.168.100.0/24', 230,  'Acceso a cursos Electronica'),
-('Docente',                '192.168.100.0/24', 300,  'Acceso a cursos de las 3 facultades y notas'),
-('Admin_TI',               '192.168.100.0/24', 400,  'Acceso total a la infraestructura');
+INSERT INTO `roles_facultad` (nombre_rol, vlan_id, descripcion) VALUES
+('Cuarentena',              90,  'Estado inicial — solo DHCP y portal cautivo'),
+('Visitante',              100,  'Acceso externo limitado via Gateway'),
+('Estudiante_Telecom',     210,  'Acceso a cursos Telecomunicaciones'),
+('Estudiante_Informatica', 220,  'Acceso a cursos Informatica'),
+('Estudiante_Electronica', 230,  'Acceso a cursos Electronica'),
+('Docente',                300,  'Acceso a cursos de las 3 facultades y notas'),
+('Admin_TI',               400,  'Acceso total a la infraestructura');
 
 -- ============================================================
 -- TABLA: servidores
@@ -81,6 +78,7 @@ CREATE TABLE IF NOT EXISTS `servidores` (
     `id_servidor`     INT         NOT NULL AUTO_INCREMENT,
     `nombre_servidor` VARCHAR(50) NOT NULL,
     `ip_servidor`     VARCHAR(15) NOT NULL,
+    `mac_servidor`    VARCHAR(17) NOT NULL,
     `descripcion`     VARCHAR(100) NULL DEFAULT NULL,
     PRIMARY KEY (`id_servidor`),
     UNIQUE INDEX `nombre_servidor` (`nombre_servidor` ASC),
@@ -89,15 +87,12 @@ CREATE TABLE IF NOT EXISTS `servidores` (
   DEFAULT CHARACTER SET=utf8mb4
   COLLATE=utf8mb4_unicode_ci;
 
-INSERT INTO `servidores` (nombre_servidor, ip_servidor, descripcion) VALUES
-('portal_cautivo',     '10.0.0.10',     'Portal Cautivo / NAS - RADIUS Client'),
-('dhcp_server',        '10.0.0.2',      'Servidor DHCP'),
-('cursos_telecom',     '10.0.0.21',     'Servidor de Cursos - Facultad Telecomunicaciones'),
-('cursos_informatica', '10.0.0.22',     'Servidor de Cursos - Facultad Informatica'),
-('cursos_electronica', '10.0.0.23',     'Servidor de Cursos - Facultad Electronica'),
-('notas',              '10.0.0.30',     'Servidor de Notas - Docentes'),
-('panel_admin_ti',     '10.0.0.40',     'Panel de Control - Admin TI'),
-('gateway_internet',   '192.168.201.1', 'Gateway Internet - Visitantes');
+INSERT INTO `servidores` (nombre_servidor, ip_servidor, mac_servidor, descripcion) VALUES
+('portal_cautivo',     '10.0.0.10',     '00:11:22:33:44:55', 'Portal Cautivo / NAS - RADIUS Client'),
+('dhcp_server',        '10.0.0.2',      '00:11:22:33:44:56', 'Servidor DHCP'),
+('cursos_telecom',     '10.0.0.3',     '00:11:22:33:44:57', 'Servidor de Cursos - Facultades'),  -- H3
+('notas y admin',      '10.0.0.4',     '00:11:22:33:44:58', 'Servidor de Notas - Docentes'),     -- H4
+('gateway_internet',   '10.0.0.1', '00:11:22:33:44:59', 'Gateway Internet - Visitantes');        -- Gateway
 
 -- ============================================================
 -- TABLA: recursos
@@ -108,146 +103,107 @@ CREATE TABLE IF NOT EXISTS `recursos` (
     `id_recurso`     INT         NOT NULL AUTO_INCREMENT,
     `nombre_recurso` VARCHAR(50) NOT NULL,
     `id_servidor`    INT         NOT NULL,
-    `ip_dst`         VARCHAR(15) NOT NULL,
-    `puerto`         INT         NOT NULL COMMENT '80, 443, 22, 67, 68...',
+    `puerto`         INT         NOT NULL DEFAULT 0 COMMENT '80, 443, 22, 67, 68...',
     `protocolo`      VARCHAR(5)  NOT NULL COMMENT 'TCP o UDP',
     `ancho_banda_default` VARCHAR(20) DEFAULT '100Mbps',
     PRIMARY KEY (`id_recurso`),
     INDEX `id_servidor` (`id_servidor` ASC),
-    INDEX `idx_ip_puerto` (`ip_dst` ASC, `puerto` ASC),
     CONSTRAINT `recursos_ibfk_1`
         FOREIGN KEY (`id_servidor`) REFERENCES `servidores` (`id_servidor`)
 ) ENGINE=InnoDB
   DEFAULT CHARACTER SET=utf8mb4
   COLLATE=utf8mb4_unicode_ci;
 
-INSERT INTO `recursos` (nombre_recurso, id_servidor, ip_dst, puerto, protocolo) VALUES
-('portal_http',            1, '10.0.0.10',     80,  'TCP'),
-('portal_https',           1, '10.0.0.10',     443, 'TCP'),
-('dhcp_discover',          2, '255.255.255.255',67,  'UDP'),
-('dhcp_offer',             2, '255.255.255.255',68,  'UDP'),
-('cursos_telecom_http',    3, '10.0.0.21',     80,  'TCP'),
-('cursos_telecom_https',   3, '10.0.0.21',     443, 'TCP'),
-('cursos_info_http',       4, '10.0.0.22',     80,  'TCP'),
-('cursos_info_https',      4, '10.0.0.22',     443, 'TCP'),
-('cursos_electro_http',    5, '10.0.0.23',     80,  'TCP'),
-('cursos_electro_https',   5, '10.0.0.23',     443, 'TCP'),
-('notas_http',             6, '10.0.0.30',     80,  'TCP'),
-('notas_https',            6, '10.0.0.30',     443, 'TCP'),
-('panel_admin_http',       7, '10.0.0.40',     80,  'TCP'),
-('panel_admin_https',      7, '10.0.0.40',     443, 'TCP'),
-('gateway_http',           8, '192.168.201.1', 80,  'TCP'),
-('gateway_https',          8, '192.168.201.1', 443, 'TCP');
+INSERT INTO `recursos` (nombre_recurso, id_servidor, puerto, protocolo, ancho_banda_default) VALUES
+('portal_http',            1,     80,  'TCP', '25Mbps'),
+('portal_https',           1,     443, 'TCP', '30Mbps'),
+('cursos_telecom_http',    3,     8080,  'TCP', '100Mbps'),
+('cursos_telecom_https',   3,     443, 'TCP', '100Mbps'),
+('cursos_info_http',       3,     8081,  'TCP', '100Mbps'),
+('cursos_info_https',      3,     443, 'TCP', '100Mbps'),
+('cursos_electro_http',    3,     8082,  'TCP', '100Mbps'),
+('cursos_electro_https',   3,     443, 'TCP', '100Mbps'),
+('notas_http',             4,     8080,  'TCP', '200Mbps'),
+('notas_https',            4,     443, 'TCP', '200Mbps'),
+('panel_admin_http',       4,     80,  'TCP', '150Mbps'),
+('panel_admin_https',      4,     443, 'TCP', '150Mbps'),
+('gateway_https',          5,     0, 'ANY', '75Mbps');
 
 -- ============================================================
 -- TABLA: politicas_rbac
 -- Tabla central de autorización: rol + recurso = accion.
 -- OPA carga esto al inicio y evalua cada solicitud.
--- tabla_of = T1|T2|T3 indica en que tabla OpenFlow instalar.
--- vlan_id  = VLAN del rol (copia de roles_facultad.vlan_id),
---            es el campo match que M6 usa en el selector OpenFlow.
 -- prioridad = prioridad del flow entry en ONOS.
 -- ============================================================
 CREATE TABLE IF NOT EXISTS `politicas_rbac` (
     `id_politica` INT               NOT NULL AUTO_INCREMENT,
-    `id_rol`      INT               NOT NULL,
-    `vlan_id`     INT               NOT NULL COMMENT 'VLAN del rol — match en selector OpenFlow',
+    `group_id`      INT               NOT NULL DEFAULT 1 COMMENT 'Grupo DNF: OR entre grupos, AND dentro del grupo',
     `id_recurso`  INT               NOT NULL,
-    `accion`      ENUM('ALLOW','DENY') NOT NULL,                                  -- L: A Eliminar: Deny es no existir registro
-    `tabla_of`    ENUM('T1','T2','T3') NOT NULL COMMENT 'Tabla OpenFlow destino',     -- L: A Eliminar
+    `tipo_condicion` VARCHAR(20)   NOT NULL DEFAULT 'rol' COMMENT 'rol, facultad, ...',
+    `id_rol` INT NULL,
+    `valor_condicion` VARCHAR(100) NULL COMMENT 'Valor para condiciones no basadas en rol',
     `prioridad`   INT               NOT NULL COMMENT 'Prioridad del flow entry',
-    `timeout_seg` INT               NULL DEFAULT NULL COMMENT 'NULL = permanente',    -- L: A Eliminar: campo 'activo' lo maneja
     `activo`      TINYINT(1)        NOT NULL DEFAULT '1',
     PRIMARY KEY (`id_politica`),
     INDEX `id_recurso` (`id_recurso` ASC),
-    INDEX `idx_vlan_recurso` (`vlan_id` ASC, `id_recurso` ASC),
     INDEX `idx_rol_recurso` (`id_rol` ASC, `id_recurso` ASC),
     CONSTRAINT `politicas_rbac_ibfk_1`
         FOREIGN KEY (`id_rol`) REFERENCES `roles_facultad` (`id_rol`),
     CONSTRAINT `politicas_rbac_ibfk_2`
         FOREIGN KEY (`id_recurso`) REFERENCES `recursos` (`id_recurso`)
 ) ENGINE=InnoDB
-  AUTO_INCREMENT=57
+  AUTO_INCREMENT=1
   DEFAULT CHARACTER SET=utf8mb4
   COLLATE=utf8mb4_unicode_ci;
 
 -- vlan_id incluido en cada INSERT para que OPA/M6 no necesiten JOIN
 -- Cuarentena (vlan_id=90) — T1 proactivo al arrancar ONOS
-INSERT INTO `politicas_rbac` (id_rol, vlan_id, id_recurso, accion, tabla_of, prioridad, timeout_seg) VALUES
-(1, 90,  1,  'ALLOW', 'T1', 100, NULL),
-(1, 90,  2,  'ALLOW', 'T1', 100, NULL),
-(1, 90,  3,  'ALLOW', 'T1', 500, NULL),
-(1, 90,  4,  'ALLOW', 'T1', 500, NULL);
+INSERT INTO `politicas_rbac` (group_id, id_rol, id_recurso, prioridad) VALUES
+(1, 1,  1, 100),
+(1, 1,  2, 100);
 
 -- Visitante (vlan_id=100) — T2 proactivo
-INSERT INTO `politicas_rbac` (id_rol, vlan_id, id_recurso, accion, tabla_of, prioridad, timeout_seg) VALUES
-(2, 100, 15, 'ALLOW', 'T2', 100, NULL),
-(2, 100, 16, 'ALLOW', 'T2', 100, NULL);
+INSERT INTO `politicas_rbac` (group_id, id_rol, id_recurso, prioridad) VALUES
+(1, 2, 13, 100);
 
 -- Estudiante Telecom (vlan_id=210)
-INSERT INTO `politicas_rbac` (id_rol, vlan_id, id_recurso, accion, tabla_of, prioridad, timeout_seg) VALUES
-(3, 210, 5,  'ALLOW', 'T2', 100, NULL),
-(3, 210, 6,  'ALLOW', 'T2', 100, NULL),
-(3, 210, 7,  'DENY',  'T3', 200, NULL),
-(3, 210, 8,  'DENY',  'T3', 200, NULL),
-(3, 210, 9,  'DENY',  'T3', 200, NULL),
-(3, 210, 10, 'DENY',  'T3', 200, NULL),
-(3, 210, 11, 'DENY',  'T3', 200, NULL),
-(3, 210, 12, 'DENY',  'T3', 200, NULL),
-(3, 210, 13, 'DENY',  'T3', 200, NULL),
-(3, 210, 14, 'DENY',  'T3', 200, NULL);
+INSERT INTO `politicas_rbac` (group_id, id_rol, id_recurso, prioridad) VALUES
+(1, 3, 3, 100),
+(1, 3, 4, 100);
 
 -- Estudiante Informatica (vlan_id=220)
-INSERT INTO `politicas_rbac` (id_rol, vlan_id, id_recurso, accion, tabla_of, prioridad, timeout_seg) VALUES
-(4, 220, 7,  'ALLOW', 'T2', 100, NULL),
-(4, 220, 8,  'ALLOW', 'T2', 100, NULL),
-(4, 220, 5,  'DENY',  'T3', 200, NULL),
-(4, 220, 6,  'DENY',  'T3', 200, NULL),
-(4, 220, 9,  'DENY',  'T3', 200, NULL),
-(4, 220, 10, 'DENY',  'T3', 200, NULL),
-(4, 220, 11, 'DENY',  'T3', 200, NULL),
-(4, 220, 12, 'DENY',  'T3', 200, NULL),
-(4, 220, 13, 'DENY',  'T3', 200, NULL),
-(4, 220, 14, 'DENY',  'T3', 200, NULL);
+INSERT INTO `politicas_rbac` (group_id, id_rol, id_recurso, prioridad) VALUES
+(1, 4, 5, 100),
+(1, 4, 6, 100);
 
 -- Estudiante Electronica (vlan_id=230)
-INSERT INTO `politicas_rbac` (id_rol, vlan_id, id_recurso, accion, tabla_of, prioridad, timeout_seg) VALUES
-(5, 230, 9,  'ALLOW', 'T2', 100, NULL),
-(5, 230, 10, 'ALLOW', 'T2', 100, NULL),
-(5, 230, 5,  'DENY',  'T3', 200, NULL),
-(5, 230, 6,  'DENY',  'T3', 200, NULL),
-(5, 230, 7,  'DENY',  'T3', 200, NULL),
-(5, 230, 8,  'DENY',  'T3', 200, NULL),
-(5, 230, 11, 'DENY',  'T3', 200, NULL),
-(5, 230, 12, 'DENY',  'T3', 200, NULL),
-(5, 230, 13, 'DENY',  'T3', 200, NULL),
-(5, 230, 14, 'DENY',  'T3', 200, NULL);
+INSERT INTO `politicas_rbac` (group_id, id_rol, id_recurso, prioridad) VALUES
+(1, 5, 7, 100),
+(1, 5, 8, 100);
 
 -- Docente (vlan_id=300)
-INSERT INTO `politicas_rbac` (id_rol, vlan_id, id_recurso, accion, tabla_of, prioridad, timeout_seg) VALUES
-(6, 300, 5,  'ALLOW', 'T2', 100, NULL),
-(6, 300, 6,  'ALLOW', 'T2', 100, NULL),
-(6, 300, 7,  'ALLOW', 'T2', 100, NULL),
-(6, 300, 8,  'ALLOW', 'T2', 100, NULL),
-(6, 300, 9,  'ALLOW', 'T2', 100, NULL),
-(6, 300, 10, 'ALLOW', 'T2', 100, NULL),
-(6, 300, 11, 'ALLOW', 'T2', 100, NULL),
-(6, 300, 12, 'ALLOW', 'T2', 100, NULL),
-(6, 300, 13, 'DENY',  'T3', 200, NULL),
-(6, 300, 14, 'DENY',  'T3', 200, NULL);
+INSERT INTO `politicas_rbac` (group_id, id_rol, id_recurso, prioridad) VALUES
+(2, 6, 3, 100),
+(2, 6, 4, 100),
+(2, 6, 5, 100),
+(2, 6, 6, 100),
+(2, 6, 7, 100),
+(2, 6, 8, 100),
+(1, 6, 9, 100),
+(1, 6, 10, 100);
 
 -- Admin TI (vlan_id=400) — acceso total
-INSERT INTO `politicas_rbac` (id_rol, vlan_id, id_recurso, accion, tabla_of, prioridad, timeout_seg) VALUES
-(7, 400, 5,  'ALLOW', 'T2', 100, NULL),
-(7, 400, 6,  'ALLOW', 'T2', 100, NULL),
-(7, 400, 7,  'ALLOW', 'T2', 100, NULL),
-(7, 400, 8,  'ALLOW', 'T2', 100, NULL),
-(7, 400, 9,  'ALLOW', 'T2', 100, NULL),
-(7, 400, 10, 'ALLOW', 'T2', 100, NULL),
-(7, 400, 11, 'ALLOW', 'T2', 100, NULL),
-(7, 400, 12, 'ALLOW', 'T2', 100, NULL),
-(7, 400, 13, 'ALLOW', 'T2', 100, NULL),
-(7, 400, 14, 'ALLOW', 'T2', 100, NULL);
+INSERT INTO `politicas_rbac` (group_id, id_rol, id_recurso, prioridad) VALUES
+(3, 7, 3, 100),
+(3, 7, 4, 100),
+(3, 7, 5, 100),
+(3, 7, 6, 100),
+(3, 7, 7, 100),
+(3, 7, 8, 100),
+(3, 7, 9, 100),
+(3, 7, 10, 100),
+(1, 7, 11, 100),
+(1, 7, 12, 100);
 
 -- ============================================================
 -- TABLA: usuarios
@@ -268,7 +224,6 @@ CREATE TABLE IF NOT EXISTS `usuarios` (
     INDEX `idx_codigo_pucp` (`codigo_pucp` ASC),
     INDEX `idx_estado` (`estado_cuenta` ASC)
 ) ENGINE=InnoDB
-  AUTO_INCREMENT=8
   DEFAULT CHARACTER SET=utf8mb4
   COLLATE=utf8mb4_unicode_ci;
 
@@ -336,9 +291,9 @@ CREATE TABLE IF NOT EXISTS `politicas_temporales` (
 
 -- L:
 INSERT INTO politicas_temporales (id_usuario, id_recurso, allow, razon, ancho_banda, expiration) VALUES
-(8,7,true,'beca de colaboración','30Mbps','2026-06-30 23:59:59'),
-(9,8,false,'acceso revocado por directiva',NULL,'2026-07-30 23:59:59'),
-(10,1,true,'invitado a feria tecnológica',NULL,'2026-06-05 12:00:00');
+(1,7,true,'beca de colaboración','30Mbps','2026-06-30 23:59:59'),
+(2,8,false,'acceso revocado por directiva',NULL,'2026-07-30 23:59:59'),
+(3,3,true,'invitado a feria tecnológica',NULL,'2026-06-05 12:00:00');
 
 
 -- ============================================================

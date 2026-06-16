@@ -62,40 +62,65 @@ def fetch_resources():
             SELECT
                 r.id_recurso AS id,
                 r.nombre_recurso AS nombre,
-                r.ip_dst,
+                s.ip_servidor AS ip_servidor,
+                s.mac_servidor AS mac_servidor,
                 r.puerto,
-                r.protocolo
+                r.protocolo,
+                r.ancho_banda_default
             FROM recursos r
+            JOIN servidores s ON r.id_servidor = s.id_servidor
         """)
         recursos_rows = cursor.fetchall()
 
         cursor.execute("""
             SELECT
                 pr.id_recurso,
-                rf.nombre_rol
+                pr.group_id,
+                pr.tipo_condicion,
+                pr.id_rol,
+                pr.valor_condicion,
+                rf.nombre_rol AS nombre_rol,
+                rf.vlan_id AS vlan_rol
             FROM politicas_rbac pr
-            JOIN roles_facultad rf
+            LEFT JOIN roles_facultad rf
                 ON pr.id_rol = rf.id_rol
             WHERE pr.activo = 1
         """)
         condiciones_rows = cursor.fetchall()
 
-        cond_dict = {}
+        grupos_por_recurso = {}
         for row in condiciones_rows:
             rid = str(row["id_recurso"])
-            cond_dict.setdefault(rid, []).append({"tipo": "rol", "valor": row["nombre_rol"]})
+            group_id = str(row["group_id"])
+            tipo = row["tipo_condicion"] or "rol"
+
+            if tipo == "rol":
+                valor = row["nombre_rol"] or (str(row["id_rol"]) if row["id_rol"] is not None else None)
+            else:
+                valor = row["valor_condicion"]
+
+            if valor is None:
+                continue
+
+            condicion = {"tipo": tipo, "valor": valor}
+            grupos_por_recurso.setdefault(rid, {}).setdefault(group_id, []).append(condicion)
 
         recursos = {}
         for r in recursos_rows:
             rid = str(r["id"])
+            grupos_map = grupos_por_recurso.get(rid, {})
+            grupos = [grupos_map[group_id] for group_id in sorted(grupos_map, key=lambda k: int(k))]
+
             recursos[rid] = {
                 "id": r["id"],
                 "nombre": r["nombre"],
-                "ip_dst": r["ip_dst"],
+                "ip_servidor": r["ip_servidor"],
+                "mac_servidor": r["mac_servidor"],
+                #"ip_dst": r["ip_dst"],
                 "puerto": r["puerto"],
                 "protocolo": r["protocolo"],
-                "condiciones": cond_dict.get(rid, []),
-                "combinacion": "or"
+                "grupos": grupos,
+                "ancho_banda_default": r["ancho_banda_default"]
             }
         return recursos
     finally:
@@ -111,8 +136,11 @@ def fetch_exceptions():
                 u.codigo_pucp   AS usuario,
                 pt.id_recurso,
                 r.nombre_recurso AS recurso,
-                pt.accion,
-                pt.expiration
+                pt.allow AS allow,
+                pt.expiration,
+                pt.razon AS razon,
+                pt.ancho_banda AS ancho_banda,
+                pt.prioridad AS prioridad
             FROM politicas_temporales pt
             JOIN usuarios u ON pt.id_usuario = u.id_usuario
             JOIN recursos r ON pt.id_recurso = r.id_recurso
@@ -127,7 +155,7 @@ def fetch_exceptions():
             ex_entry = {
                 "recurso_id": str(row["id_recurso"]),
                 "recurso":    row["recurso"],
-                "allow":      row["accion"] == "ALLOW"
+                "allow":      "allow" if row["allow"] else "deny",
             }
             if row["expiration"]:
                 ex_entry["expires_at"] = row["expiration"].strftime(
