@@ -205,6 +205,16 @@ INSERT INTO `politicas_rbac` (group_id, id_rol, id_recurso, prioridad) VALUES
 (1, 7, 11, 100),
 (1, 7, 12, 100);
 
+-- Grupo 4: Docente Y Admin_TI → recurso 11 (panel_admin_http)
+INSERT INTO politicas_rbac (group_id, id_rol, id_recurso, prioridad) VALUES
+(4, 6, 11, 100),  -- Docente
+(4, 7, 11, 100);  -- Admin_TI
+
+-- Grupo 5: Estudiante_Informatica Y Admin_TI → recurso 9 (notas_http)
+INSERT INTO politicas_rbac (group_id, id_rol, id_recurso, prioridad) VALUES
+(5, 4, 9, 100),  -- Estudiante_Informatica
+(5, 7, 9, 100);  -- Admin_TI
+
 -- ============================================================
 -- TABLA: usuarios
 -- Almacena las credenciales de los usuarios PUCP.
@@ -235,7 +245,10 @@ INSERT INTO `usuarios` (codigo_pucp, password_hash, estado_cuenta) VALUES
 ('DOC20192020', SHA2('pass_doc1123',    256), 'ACTIVO'),
 ('DOC20192021', SHA2('pass_doc2123',    256), 'ACTIVO'),
 ('DOC20192022', SHA2('pass_doc3123',    256), 'ACTIVO'),
-('ADMIN001',    SHA2('pass_admin123',   256), 'ACTIVO');
+('ADMIN001',    SHA2('pass_admin123',   256), 'ACTIVO'),
+('multi_teleco_docente', SHA2('pass_multi1', 256), 'ACTIVO'),
+('multi_info_admin',     SHA2('pass_multi2', 256), 'ACTIVO'),
+('multi_docente_admin',  SHA2('pass_multi3', 256), 'ACTIVO');
 
 CREATE TABLE IF NOT EXISTS `historial_sesiones` (
     `id_historial`      INT          NOT NULL AUTO_INCREMENT,
@@ -294,7 +307,17 @@ INSERT INTO politicas_temporales (id_usuario, id_recurso, allow, razon, ancho_ba
 (1,7,true,'beca de colaboración','30Mbps','2026-06-30 23:59:59'),
 (2,8,false,'acceso revocado por directiva',NULL,'2026-07-30 23:59:59'),
 (3,3,true,'invitado a feria tecnológica',NULL,'2026-06-05 12:00:00');
+-- multi_teleco_docente: denegación a cursos_telecom_https (recurso 4)
+INSERT INTO politicas_temporales (id_usuario, id_recurso, allow, razon, ancho_banda, expiration) VALUES
+(8, 4, false, 'Denegación por prueba multirol', NULL, '2026-12-31 23:59:59');
 
+-- multi_info_admin: permiso especial a notas_https (recurso 10) con ancho_banda extra
+INSERT INTO politicas_temporales (id_usuario, id_recurso, allow, razon, ancho_banda, expiration) VALUES
+(9, 10, true, 'Permiso con ancho_banda extra', '60Mbps', '2026-12-31 23:59:59');
+
+-- multi_docente_admin: denegación a panel_admin_https (recurso 12)
+INSERT INTO politicas_temporales (id_usuario, id_recurso, allow, razon, ancho_banda, expiration) VALUES
+(10, 12, false, 'Denegación panel admin', NULL, '2026-12-31 23:59:59');
 
 -- ============================================================
 -- TABLA: sesiones_activas
@@ -357,7 +380,14 @@ INSERT INTO `usuarios_roles` (id_usuario, id_rol, activo) VALUES
 (4, 6, 1),  -- DOC20192020 -> Docente
 (5, 6, 1),  -- DOC20192021 -> Docente
 (6, 6, 1),  -- DOC20192022 -> Docente
-(7, 7, 1);  -- ADMIN001    -> Admin_TI
+(7, 7, 1),  -- ADMIN001    -> Admin_TI
+
+(8, 3, 1),  -- multi_teleco_docente -> Estudiante_Telecom
+(8, 6, 1),  -- multi_teleco_docente -> Docente
+(9, 4, 1),  -- multi_info_admin -> Estudiante_Informatica
+(9, 7, 1),  -- multi_info_admin -> Admin_TI
+(10,6, 1),  -- multi_docente_admin -> Docente
+(10,7, 1);  -- multi_docente_admin -> Admin_TI
 
 -- ============================================================
 -- TABLAS NATIVAS DE FREERADIUS (requeridas por rlm_sql)

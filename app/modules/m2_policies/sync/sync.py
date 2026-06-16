@@ -155,12 +155,14 @@ def fetch_exceptions():
             ex_entry = {
                 "recurso_id": str(row["id_recurso"]),
                 "recurso":    row["recurso"],
-                "allow":      "allow" if row["allow"] else "deny",
+                "allow":      bool(row["allow"]),
             }
             if row["expiration"]:
                 ex_entry["expires_at"] = row["expiration"].strftime(
                     "%Y-%m-%dT%H:%M:%SZ"
                 )
+            if row["ancho_banda"] is not None:
+                ex_entry["ancho_banda"] = row["ancho_banda"]
             excepciones_por_usuario.setdefault(usuario, []).append(ex_entry)
 
         return excepciones_por_usuario

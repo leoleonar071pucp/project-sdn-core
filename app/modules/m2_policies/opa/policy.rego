@@ -87,10 +87,7 @@ result := {
     ],
 }
 
-# FIX 1: eliminar la doble evaluación de permisivos[rid].
-# ex := permisivos[rid] ya falla si no existe — la guarda
-# redundante "permisivos[rid]" antes de la asignación era
-# un lookup extra innecesario.
+
 construir_permiso(rid, r) := permiso if {
     not denegados[rid]
     ex := permisivos[rid]
@@ -129,12 +126,21 @@ allow_resource := decision if {
     rid := resolve_rid
     r   := recursos[rid]
     ex  := user_exceptions_map[rid]
+    ex.allow == true
     decision := {
-        "allow":       ex.allow,
+        "allow":       true,
         "recurso":     recurso_base(r),
         "ancho_banda": object.get(ex, "ancho_banda", r.ancho_banda_default),
         "expires_at":  object.get(ex, "expires_at", null),
-        "razon":       "excepcion",
+        "razon":       "excepcion_temporal_permisiva",
+    }
+} else := decision if {
+    rid := resolve_rid
+    ex  := user_exceptions_map[rid]
+    ex.allow == false
+    decision := {
+        "allow": false,
+        "razon": "excepcion_temporal_denegatoria",
     }
 } else := decision if {
     rid := resolve_rid
@@ -143,6 +149,7 @@ allow_resource := decision if {
     cumple_grupos(r.grupos)
     decision := {
         "allow":       true,
+        "recurso":     recurso_base(r),
         "ancho_banda": r.ancho_banda_default,
         "expires_at":  null,
         "razon":       "condiciones_generales",
@@ -167,8 +174,6 @@ cumple_grupos(grupos) if {
     grupo_cumple(grupo)
 }
 
-# FIX 2: count(grupo) > 0 evita que un grupo vacío [] siempre
-# cumpla (every sobre conjunto vacío es true en Rego).
 grupo_cumple(grupo) if {
     count(grupo) > 0
     every cond in grupo {
@@ -187,14 +192,6 @@ evaluar_condicion(cond) if {
     cond.valor in input.roles
 }
 
-# FIX 3 / NUEVO: rol "any" — se cumple si el usuario tiene
-# al menos un rol. Permite expresar "cualquier rol válido"
-# dentro de un grupo AND sin importar cuál sea.
-# Ejemplo: [ {tipo:rol, valor:Docente}, {tipo:rol, valor:any} ]
-# → usuario debe ser Docente Y tener al menos un rol (siempre
-#   true para cualquier docente con roles), lo que equivale
-#   a "solo Docente" en la práctica si se combina bien.
-# Más útil: [ {tipo:rol, valor:any} ] solo → acceso universal.
 evaluar_condicion(cond) if {
     cond.tipo == "rol"
     cond.valor == "any"

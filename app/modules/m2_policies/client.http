@@ -1,4 +1,7 @@
-### 1. Estudiante Telecom (20192434) – debe acceder a cursos_telecom_http/https (ids 5,6)
+### ============================================================
+### 1. EVALUACIONES COMPLETAS (/v1/data/policy/result)
+
+### 1.1 Estudiante Telecom (20192434) – debe acceder a cursos_telecom_http/https (ids 3,4)
 POST http://localhost:8182/v1/data/policy/result
 Content-Type: application/json
 
@@ -8,8 +11,9 @@ Content-Type: application/json
         "roles": ["Estudiante_Telecom"]
     }
 }
+# Esperado: permisos para recursos 3,4
 
-### 2. Estudiante Informática (20200101) – debe acceder a cursos_info_http/https (ids 7,8)
+### 1.2 Estudiante Informática (20200101) – debe acceder a cursos_info_http/https (ids 5,6)
 POST http://localhost:8182/v1/data/policy/result
 Content-Type: application/json
 
@@ -19,8 +23,9 @@ Content-Type: application/json
         "roles": ["Estudiante_Informatica"]
     }
 }
+# Esperado: permisos para recursos 5,6. Además, tiene excepcióndeny en 8. Pero 8 no está en sus políticas, así que no afecta.
 
-### 3. Estudiante Electrónica (20200202) – debe acceder a cursos_electro_http/https (ids 9,10)
+### 1.3 Estudiante Electrónica (20200202) – debe acceder a cursos_electro_http/https (ids 7,8)
 POST http://localhost:8182/v1/data/policy/result
 Content-Type: application/json
 
@@ -30,8 +35,9 @@ Content-Type: application/json
         "roles": ["Estudiante_Electronica"]
     }
 }
+# Esperado: permisos para recursos 7,8.
 
-### 4. Docente (DOC20192020) – debe acceder a casi todos excepto gateway? (politicas: deny a gateway? No, tiene deny a recursos 13,14? En la inserción docente: DENY a 13,14 que son panel_admin_http/https. Además tiene ALLOW a 5-12)
+### 1.4 Docente (DOC20192020) – acceso a muchos recursos
 POST http://localhost:8182/v1/data/policy/result
 Content-Type: application/json
 
@@ -41,8 +47,9 @@ Content-Type: application/json
         "roles": ["Docente"]
     }
 }
+# Esperado: recursos 3,4,5,6,7,8,9,10 (por políticas Docente). No tiene acceso a 11,12 (panel_admin) ni a 13 (gateway) a menos que tenga facultad Teleco. Tampoco a 1,2 (portal).
 
-### 5. Admin TI (ADMIN001) – acceso total a todos los recursos (5-14) según políticas
+### 1.5 Admin TI (ADMIN001) – acceso total a casi todos
 POST http://localhost:8182/v1/data/policy/result
 Content-Type: application/json
 
@@ -52,8 +59,9 @@ Content-Type: application/json
         "roles": ["Admin_TI"]
     }
 }
+# Esperado: recursos 3,4,5,6,7,8,9,10,11,12. No tiene acceso a 13 (gateway) a menos que cumpla grupo AND con facultad, pero no tiene facultad.
 
-### 6. Visitante (no hay usuario dedicado, pero simulamos con rol Visitante) – solo gateway_http/https (ids 15,16)
+### 1.6 Visitante (visitante_test) – solo gateway_https (recurso 13)
 POST http://localhost:8182/v1/data/policy/result
 Content-Type: application/json
 
@@ -63,60 +71,258 @@ Content-Type: application/json
         "roles": ["Visitante"]
     }
 }
+# Esperado: recurso 13 (gateway_https) por política de Visitante.
 
-### 7. Estudiante Telecom con excepción temporal a notas_http (id 11) – asumiendo que la excepción se asigna al usuario 20200101 o similar. Para probar, usamos 20200101 (Estudiante Informática) que no tiene permiso por defecto a notas_http, pero la excepción (politicas_temporales) debería darle acceso.
+### 1.7 Usuario multirol: multi_teleco_docente (Estudiante_Telecom + Docente)
 POST http://localhost:8182/v1/data/policy/result
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "multi_teleco_docente",
+        "roles": ["Estudiante_Telecom", "Docente"]
+    }
+}
+# Esperado: acceso a 3,4 (por ambos roles), 5,6,7,8,9,10 (por Docente). Excepción deny en recurso 4 (cursos_telecom_https) lo elimina de la lista, así que no aparecerá 4. Tampoco 11,12,13.
+
+### 1.8 Usuario multirol: multi_info_admin (Estudiante_Informatica + Admin_TI)
+POST http://localhost:8182/v1/data/policy/result
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "multi_info_admin",
+        "roles": ["Estudiante_Informatica", "Admin_TI"]
+    }
+}
+# Esperado: acceso a 3,4,5,6,7,8,9,10,11,12 (por Admin_TI y Estudiante_Informatica). Excepción allow en recurso 10 (notas_https) con ancho_banda 60Mbps y tabla T3 (sobrescribe el ancho_banda default). Además, el recurso 11 (panel_admin_http) es accesible por Admin_TI, y también por grupo AND (Estudiante_Informatica + Admin_TI).
+
+### 1.9 Usuario multirol: multi_docente_admin (Docente + Admin_TI)
+POST http://localhost:8182/v1/data/policy/result
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "multi_docente_admin",
+        "roles": ["Docente", "Admin_TI"]
+    }
+}
+# Esperado: acceso a 3,4,5,6,7,8,9,10,11,12. Excepción deny en recurso 12 (panel_admin_https) lo elimina, así que 12 no aparece. No tiene acceso a 13 (gateway) a menos que envíe facultad=Teleco (se prueba en /allow_resource).
+
+
+### ============================================================
+### 2. CONSULTAS INDIVIDUALES (/v1/data/policy/allow_resource)
+
+### 2.1 Estudiante Telecom a recurso permitido: cursos_telecom_https (id 4)
+POST http://localhost:8182/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "20192434",
+        "roles": ["Estudiante_Telecom"],
+        "recurso_id": 4
+    }
+}
+# Esperado: allow true, ancho_banda "100Mbps", razon "condiciones_generales"
+
+### 2.2 Estudiante Telecom a recurso denegado por política: cursos_info_http (id 5)
+POST http://localhost:8182/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "20192434",
+        "roles": ["Estudiante_Telecom"],
+        "recurso_id": 5
+    }
+}
+# Esperado: allow false, razon "denegado_por_politica"
+
+### 2.3 Estudiante Informática a notas_http (id 9) – sin excepción, denegado por política
+POST http://localhost:8182/v1/data/policy/allow_resource
 Content-Type: application/json
 
 {
     "input": {
         "usuario": "20200101",
-        "roles": ["Estudiante_Informatica"]
+        "roles": ["Estudiante_Informatica"],
+        "recurso_id": 9
     }
 }
-# Nota: Si la excepción está configurada para este usuario y recurso 11, debería aparecer con tabla T3.
+# Esperado: allow false (no tiene rol Docente ni Admin_TI)
 
-### 8. Docente con denegación temporal a notas_https (id 12) – si se asigna excepción deny a algún docente (ej. DOC20192020), ese recurso no aparecerá.
-POST http://localhost:8182/v1/data/policy/result
+### 2.4 Estudiante Informática a cursos_info_http (id 5) – permitido
+POST http://localhost:8182/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "20200101",
+        "roles": ["Estudiante_Informatica"],
+        "recurso_id": 5
+    }
+}
+# Esperado: allow true
+
+### 2.5 Docente a notas_http (id 9) – permitido
+POST http://localhost:8182/v1/data/policy/allow_resource
 Content-Type: application/json
 
 {
     "input": {
         "usuario": "DOC20192020",
-        "roles": ["Docente"]
+        "roles": ["Docente"],
+        "recurso_id": 9
     }
 }
-# Si hay excepción deny para recurso 12, no aparecerá en permisos.
+# Esperado: allow true, ancho_banda "200Mbps"
 
-### ============================================
-### CONSULTAS INDIVIDUALES (/policy/allow_resource)
-### ============================================
-
-### 9. Estudiante Telecom a recurso permitido: cursos_telecom_https (id 6) -> allow true
+### 2.6 Docente a notas_https (id 10) – permitido (no hay excepción deny para DOC20192020)
 POST http://localhost:8182/v1/data/policy/allow_resource
 Content-Type: application/json
 
 {
     "input": {
-        "usuario": "20192434",
-        "roles": ["Estudiante_Telecom"],
-        "recurso_id": 6
+        "usuario": "DOC20192020",
+        "roles": ["Docente"],
+        "recurso_id": 10
     }
 }
+# Esperado: allow true
 
-### 10. Estudiante Telecom a recurso denegado por política: cursos_info_http (id 7) -> allow false
+### 2.7 Admin TI a panel_admin_http (id 11) – permitido
 POST http://localhost:8182/v1/data/policy/allow_resource
 Content-Type: application/json
 
 {
     "input": {
-        "usuario": "20192434",
-        "roles": ["Estudiante_Telecom"],
-        "recurso_id": 7
+        "usuario": "ADMIN001",
+        "roles": ["Admin_TI"],
+        "recurso_id": 11
     }
 }
+# Esperado: allow true, ancho_banda "150Mbps"
 
-### 11. Estudiante Informática a notas_http (id 11) – si tiene excepción temporal permitida -> allow true con ancho_banda especial
+### 2.8 Admin TI a panel_admin_https (id 12) – permitido
+POST http://localhost:8182/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "ADMIN001",
+        "roles": ["Admin_TI"],
+        "recurso_id": 12
+    }
+}
+# Esperado: allow true
+
+### 2.9 Visitante a gateway_https (id 13) – permitido
+POST http://localhost:8182/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "visitante_test",
+        "roles": ["Visitante"],
+        "recurso_id": 13
+    }
+}
+# Esperado: allow true, ancho_banda "75Mbps"
+
+### 2.10 Visitante a cursos_telecom_http (id 3) – denegado
+POST http://localhost:8182/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "visitante_test",
+        "roles": ["Visitante"],
+        "recurso_id": 3
+    }
+}
+# Esperado: allow false
+
+### 2.11 multi_teleco_docente a cursos_telecom_https (id 4) – denegado por excepción (allow false)
+POST http://localhost:8182/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "multi_teleco_docente",
+        "roles": ["Estudiante_Telecom", "Docente"],
+        "recurso_id": 4
+    }
+}
+# Esperado: allow false, razon "excepcion" (excepción temporal)
+
+### 2.12 multi_teleco_docente a notas_http (id 9) – permitido por Docente
+POST http://localhost:8182/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "multi_teleco_docente",
+        "roles": ["Estudiante_Telecom", "Docente"],
+        "recurso_id": 9
+    }
+}
+# Esperado: allow true, razon "condiciones_generales"
+
+### 2.13 multi_info_admin a notas_https (id 10) – permitido por excepción allow con ancho_banda especial
+POST http://localhost:8182/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "multi_info_admin",
+        "roles": ["Estudiante_Informatica", "Admin_TI"],
+        "recurso_id": 10
+    }
+}
+# Esperado: allow true, ancho_banda "60Mbps", razon "excepcion", expires_at "2026-12-31T23:59:59Z"
+
+### 2.14 multi_docente_admin a panel_admin_https (id 12) – denegado por excepción allow false
+POST http://localhost:8182/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "multi_docente_admin",
+        "roles": ["Docente", "Admin_TI"],
+        "recurso_id": 12
+    }
+}
+# Esperado: allow false, razon "excepcion"
+
+### 2.15 multi_docente_admin a gateway_https (id 13) sin facultad – denegado por política (no cumple grupo AND)
+POST http://localhost:8182/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "multi_docente_admin",
+        "roles": ["Docente", "Admin_TI"],
+        "recurso_id": 13
+    }
+}
+# Esperado: allow false, razon "denegado_por_politica" (no tiene rol Visitante ni cumple Docente+facultad Teleco)
+
+### 2.16 multi_docente_admin a gateway_https (id 13) con facultad Teleco – permitido por grupo AND
+POST http://localhost:8182/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "multi_docente_admin",
+        "roles": ["Docente", "Admin_TI"],
+        "facultad": "Teleco",
+        "recurso_id": 13
+    }
+}
+# Esperado: allow true, ancho_banda "75Mbps", razon "condiciones_generales"
+
+### 2.17 Estudiante Informática a panel_admin_http (id 11) – sin Admin_TI, no cumple grupo AND (Estudiante_Informatica+Admin_TI)
 POST http://localhost:8182/v1/data/policy/allow_resource
 Content-Type: application/json
 
@@ -127,82 +333,35 @@ Content-Type: application/json
         "recurso_id": 11
     }
 }
+# Esperado: allow false (no tiene Admin_TI)
 
-### 12. Docente a notas_https (id 12) – si tiene excepción denegatoria -> allow false razon excepcion
+### 2.18 multi_info_admin a panel_admin_http (id 11) – permitido por Admin_TI (y también por grupo AND)
 POST http://localhost:8182/v1/data/policy/allow_resource
 Content-Type: application/json
 
 {
     "input": {
-        "usuario": "DOC20192020",
-        "roles": ["Docente"],
-        "recurso_id": 12
-    }
-}
-
-### 13. Admin TI a panel_admin_http (id 13) – debería ser allow true (sin excepción denegatoria)
-POST http://localhost:8182/v1/data/policy/allow_resource
-Content-Type: application/json
-
-{
-    "input": {
-        "usuario": "ADMIN001",
-        "roles": ["Admin_TI"],
-        "recurso_id": 13
-    }
-}
-
-### 14. Visitante a gateway_https (id 16) – debería ser allow true (política T2)
-POST http://localhost:8182/v1/data/policy/allow_resource
-Content-Type: application/json
-
-{
-    "input": {
-        "usuario": "visitante_test",
-        "roles": ["Visitante"],
-        "recurso_id": 16
-    }
-}
-
-### 15. Visitante a cursos_telecom_http (id 5) – sin excepción, denegado por política -> allow false
-POST http://localhost:8182/v1/data/policy/allow_resource
-Content-Type: application/json
-
-{
-    "input": {
-        "usuario": "visitante_test",
-        "roles": ["Visitante"],
-        "recurso_id": 5
-    }
-}
-
-### 16. Estudiante Telecom a portal_http (id 1) – Nota: Los recursos portal (1,2) y dhcp (3,4) tienen políticas solo para rol Visitante? En la inserción inicial de politicas_rbac solo se asignaron para rol Visitante (id_rol=2) y luego para los otros roles. En los inserts de estudiantes no se incluyen esos recursos, por lo que deberían estar denegados por defecto. Probamos:
-POST http://localhost:8182/v1/data/policy/allow_resource
-Content-Type: application/json
-
-{
-    "input": {
-        "usuario": "20192434",
-        "roles": ["Estudiante_Telecom"],
-        "recurso_id": 1
-    }
-}
-# Esperado: allow false (no hay política que lo permita)
-
-### 17. Estudiante Telecom con rol múltiple (simulado) – pero los usuarios tienen un solo rol en la DB. Para probar multirrol, podemos agregar un input con roles adicionales manualmente. Por ejemplo, usuario 20192434 con roles ["Estudiante_Telecom","Docente"]:
-POST http://localhost:8182/v1/data/policy/allow_resource
-Content-Type: application/json
-
-{
-    "input": {
-        "usuario": "20192434",
-        "roles": ["Estudiante_Telecom", "Docente"],
+        "usuario": "multi_info_admin",
+        "roles": ["Estudiante_Informatica", "Admin_TI"],
         "recurso_id": 11
     }
 }
-# Esperado: allow true (por rol docente)
+# Esperado: allow true
 
-### 18. Recurso inexistente (id 99) -> debe dar error o undefined? El helper resolve_rid fallará y la regla allow_resource no producirá resultado (404).
+### 2.19 Usuario sin roles (sin_roles) a cualquier recurso – denegado
+POST http://localhost:8182/v1/data/policy/allow_resource
+Content-Type: application/json
+
+{
+    "input": {
+        "usuario": "sin_roles",
+        "roles": [],
+        "recurso_id": 3
+    }
+}
+# Esperado: allow false
+
+### 2.20 Recurso inexistente (id 99) – debe devolver 404 o error (OPA no encuentra el recurso)
 POST http://localhost:8182/v1/data/policy/allow_resource
 Content-Type: application/json
 
@@ -213,15 +372,8 @@ Content-Type: application/json
         "recurso_id": 99
     }
 }
+# Esperado: respuesta vacía o error porque resolve_rid no encuentra el recurso.
 
-### 19. Usuario sin roles (rol vacío) a cualquier recurso -> denegado
-POST http://localhost:8182/v1/data/policy/allow_resource
-Content-Type: application/json
-
-{
-    "input": {
-        "usuario": "sin_roles",
-        "roles": [],
-        "recurso_id": 5
-    }
-}
+### ============================================================
+### FIN DEL ARCHIVO
+### ============================================================
