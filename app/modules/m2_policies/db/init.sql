@@ -88,11 +88,11 @@ CREATE TABLE IF NOT EXISTS `servidores` (
   COLLATE=utf8mb4_unicode_ci;
 
 INSERT INTO `servidores` (nombre_servidor, ip_servidor, mac_servidor, descripcion) VALUES
-('portal_cautivo',     '10.0.0.10',     '00:11:22:33:44:55', 'Portal Cautivo / NAS - RADIUS Client'),
-('dhcp_server',        '10.0.0.2',      '00:11:22:33:44:56', 'Servidor DHCP'),
-('cursos_telecom',     '10.0.0.3',     '00:11:22:33:44:57', 'Servidor de Cursos - Facultades'),  -- H3
-('notas y admin',      '10.0.0.4',     '00:11:22:33:44:58', 'Servidor de Notas - Docentes'),     -- H4
-('gateway_internet',   '10.0.0.1', '00:11:22:33:44:59', 'Gateway Internet - Visitantes');        -- Gateway
+('portal_cautivo',    '192.168.200.211',    '00:11:22:33:44:55', 'Portal Cautivo / NAS - RADIUS Client'),
+('dhcp_server',       '192.168.200.200',    '00:11:22:33:44:56', 'Servidor DHCP'),
+('srv1_academicos',   '192.168.100.101',  'fa:16:3e:05:3f:5f', 'Servidor de Cursos - Facultades'),  -- H3
+('srv2_notas',        '192.168.100.102',  'fa:16:3e:00:9c:f3', 'Servidor de Notas - Admins'),     -- H4
+('gateway_internet',  '10.20.11.32',      '00:11:22:33:44:59', 'Gateway Internet');        -- Gateway
 
 -- ============================================================
 -- TABLA: recursos
@@ -115,19 +115,19 @@ CREATE TABLE IF NOT EXISTS `recursos` (
   COLLATE=utf8mb4_unicode_ci;
 
 INSERT INTO `recursos` (nombre_recurso, id_servidor, puerto, protocolo, ancho_banda_default) VALUES
-('portal_http',            1,     80,  'TCP', '25Mbps'),
-('portal_https',           1,     443, 'TCP', '30Mbps'),
-('cursos_telecom_http',    3,     8080,  'TCP', '100Mbps'),
-('cursos_telecom_https',   3,     443, 'TCP', '100Mbps'),
-('cursos_info_http',       3,     8081,  'TCP', '100Mbps'),
-('cursos_info_https',      3,     443, 'TCP', '100Mbps'),
-('cursos_electro_http',    3,     8082,  'TCP', '100Mbps'),
-('cursos_electro_https',   3,     443, 'TCP', '100Mbps'),
-('notas_http',             4,     8080,  'TCP', '200Mbps'),
-('notas_https',            4,     443, 'TCP', '200Mbps'),
-('panel_admin_http',       4,     80,  'TCP', '150Mbps'),
-('panel_admin_https',      4,     443, 'TCP', '150Mbps'),
-('gateway_https',          5,     0, 'ANY', '75Mbps');
+('portal_http',           1,     80,  'TCP', '25Mbps'),
+('portal_https',          1,     443, 'TCP', '30Mbps'),
+('cursos_telecom_http',   3,     8001,  'TCP', '100Mbps'),
+('cursos_telecom_https',  3,     1443, 'TCP', '100Mbps'),
+('cursos_info_http',      3,     8002,  'TCP', '100Mbps'),
+('cursos_info_https',     3,     2443, 'TCP', '100Mbps'),
+('cursos_electro_http',   3,     8003,  'TCP', '100Mbps'),
+('cursos_electro_https',  3,     3443, 'TCP', '100Mbps'),
+('notas_http',            4,     8080,  'TCP', '200Mbps'),
+('notas_https',           4,     443, 'TCP', '200Mbps'),
+('panel_admin_http',      4,     8081,  'TCP', '150Mbps'),
+('panel_admin_https',     4,     8443, 'TCP', '150Mbps'),
+('internet_gi',           5,     0, 'ANY', '75Mbps');
 
 -- ============================================================
 -- TABLA: politicas_rbac
@@ -136,14 +136,14 @@ INSERT INTO `recursos` (nombre_recurso, id_servidor, puerto, protocolo, ancho_ba
 -- prioridad = prioridad del flow entry en ONOS.
 -- ============================================================
 CREATE TABLE IF NOT EXISTS `politicas_rbac` (
-    `id_politica` INT               NOT NULL AUTO_INCREMENT,
-    `group_id`      INT               NOT NULL DEFAULT 1 COMMENT 'Grupo DNF: OR entre grupos, AND dentro del grupo',
-    `id_recurso`  INT               NOT NULL,
-    `tipo_condicion` VARCHAR(20)   NOT NULL DEFAULT 'rol' COMMENT 'rol, facultad, ...',
-    `id_rol` INT NULL,
+    `id_politica`   INT     NOT NULL AUTO_INCREMENT,
+    `group_id`      INT     NOT NULL DEFAULT 1 COMMENT 'Grupo DNF: OR entre grupos, AND dentro del grupo',
+    `id_recurso`    INT     NOT NULL,
+    `tipo_condicion` VARCHAR(20)  NOT NULL DEFAULT 'rol' COMMENT 'rol, facultad, ...',
+    `id_rol`        INT     NOT NULL,
     `valor_condicion` VARCHAR(100) NULL COMMENT 'Valor para condiciones no basadas en rol',
-    `prioridad`   INT               NOT NULL COMMENT 'Prioridad del flow entry',
-    `activo`      TINYINT(1)        NOT NULL DEFAULT '1',
+    `prioridad`     INT           NOT NULL COMMENT 'Prioridad del flow entry',
+    `activo`        TINYINT(1)    NOT NULL DEFAULT '1',
     PRIMARY KEY (`id_politica`),
     INDEX `id_recurso` (`id_recurso` ASC),
     INDEX `idx_rol_recurso` (`id_rol` ASC, `id_recurso` ASC),
@@ -252,6 +252,7 @@ INSERT INTO `usuarios` (codigo_pucp, password_hash, estado_cuenta) VALUES
 
 CREATE TABLE IF NOT EXISTS `historial_sesiones` (
     `id_historial`      INT          NOT NULL AUTO_INCREMENT,
+    `id_sesion_orig`  INT          NOT NULL COMMENT 'id_sesion original de sesiones_activas',
     `id_usuario`        INT          NOT NULL,
     `mac_address`       VARCHAR(17)  NOT NULL,
     `ip_asignada`       VARCHAR(15)  NOT NULL,
@@ -261,14 +262,14 @@ CREATE TABLE IF NOT EXISTS `historial_sesiones` (
     `in_port`           INT          NOT NULL,
     `login_timestamp`   TIMESTAMP    NOT NULL,
     `logout_timestamp`  TIMESTAMP    NULL DEFAULT NULL,
-    `motivo_cierre`     ENUM('LOGOUT','TIMEOUT','REVOCADA') NOT NULL DEFAULT 'LOGOUT',
+    `motivo_cierre`     ENUM('LOGOUT_VOLUNTARIO','REVOCADA_M4','EXPIRACION','ADMIN') NOT NULL,
     PRIMARY KEY (`id_historial`),
     INDEX `idx_usuario` (`id_usuario`),
     INDEX `idx_mac`     (`mac_address`),
     INDEX `idx_login`   (`login_timestamp`),
+    INDEX `idx_logout_ts`   (`logout_timestamp` ASC),
     CONSTRAINT `historial_ibfk_1`
-        FOREIGN KEY (`id_usuario`)
-        REFERENCES `usuarios` (`id_usuario`) ON DELETE CASCADE
+        FOREIGN KEY (`id_usuario`) REFERENCES `usuarios` (`id_usuario`) ON DELETE CASCADE
 ) ENGINE=InnoDB
   DEFAULT CHARACTER SET=utf8mb4
   COLLATE=utf8mb4_unicode_ci
@@ -285,7 +286,6 @@ CREATE TABLE IF NOT EXISTS `politicas_temporales` (
     `id_usuario` INT               NOT NULL,
     `id_recurso` INT               NOT NULL,
     `allow`     BOOLEAN           NOT NULL,       -- L: logico 
-    `tabla_of`   ENUM('T3')        NOT NULL DEFAULT 'T3' COMMENT 'Siempre en T3 (excepcion personal)',   -- L: A Eliminar
     `razon`     VARCHAR(255)     NULL DEFAULT NULL COMMENT 'Motivo de la excepcion temporal',   -- L: Para logs/auditoria y control de excepciones
     `ancho_banda` VARCHAR(20) DEFAULT '50Mbps',   -- L: Para meter
     `prioridad`  INT               NOT NULL DEFAULT '800',
@@ -554,19 +554,23 @@ CREATE TABLE IF NOT EXISTS `ip_mac_binding` (
     `id_binding`      INT         NOT NULL AUTO_INCREMENT,
     `ip_asignada`     VARCHAR(15) NOT NULL,
     `mac_address`     VARCHAR(17) NOT NULL,
+    `id_usuario`      INT         NOT NULL,
+    `switch_dpid`     VARCHAR(30) NOT NULL COMMENT 'Switch donde esta conectado el cliente',
+    `in_port`         INT         NOT NULL COMMENT 'Puerto del switch',
     `id_sesion`       INT         NOT NULL,
     `created_at`      TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id_binding`),
-    UNIQUE INDEX `idx_ip`      (`ip_asignada`),
-    UNIQUE INDEX `idx_mac`     (`mac_address`),
-    UNIQUE INDEX `idx_sesion`  (`id_sesion`),
+    UNIQUE INDEX `uq_ip_asignada`  (`ip_asignada` ASC)  COMMENT 'Una IP activa = un binding',
+    UNIQUE INDEX `uq_mac_address`  (`mac_address` ASC)  COMMENT 'Una MAC activa = un binding',
+    INDEX `idx_id_usuario`         (`id_usuario` ASC),
+    CONSTRAINT `ip_mac_binding_ibfk_1`
+        FOREIGN KEY (`id_usuario`) REFERENCES `usuarios` (`id_usuario`) ON DELETE CASCADE,
     CONSTRAINT `binding_ibfk_1`
-        FOREIGN KEY (`id_sesion`)
-        REFERENCES `sesiones_activas` (`id_sesion`) ON DELETE CASCADE
+        FOREIGN KEY (`id_sesion`) REFERENCES `sesiones_activas` (`id_sesion`) ON DELETE CASCADE
 ) ENGINE=InnoDB
   DEFAULT CHARACTER SET=utf8mb4
   COLLATE=utf8mb4_unicode_ci
-  COMMENT='Anti-spoofing: par IP+MAC vinculado a una sesion activa. M1 escribe, T1 valida.';
+  COMMENT='Binding IP-MAC activos vinculado a una sesion activa. M1 escribe, T1 valida.';
 
 
 -- ============================================================
