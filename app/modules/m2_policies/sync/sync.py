@@ -5,15 +5,16 @@ import requests
 from datetime import datetime
 
 DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "db"),
-    "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", "rootpass"),
-    "database": os.getenv("DB_NAME", "radius_db"),
-    "charset": "utf8mb4",
+    "host":     os.getenv("DB_HOST",     "localhost"),
+    "user":     os.getenv("DB_USER",     "radius"),
+    "password": os.getenv("DB_PASSWORD", "radius_pass"),
+    "database": os.getenv("DB_NAME",     "radius_db"),
+    "charset":  "utf8mb4",
     "connect_timeout": 5,
 }
 
-OPA_URL = os.getenv("OPA_URL", "http://opa:8181")
+# OPA corre en la misma VM (VM-Auth), puerto 8182 (8181 es ONOS)
+OPA_URL = os.getenv("OPA_URL", "http://127.0.0.1:8182")
 
 RESOURCES_INTERVAL = int(os.getenv("RESOURCES_SYNC_INTERVAL", "300"))  # 5 min
 EXCEPTIONS_INTERVAL = int(os.getenv("EXCEPTIONS_SYNC_INTERVAL", "30"))  # 30 seg
@@ -78,6 +79,7 @@ def fetch_resources():
             JOIN roles_facultad rf
                 ON pr.id_rol = rf.id_rol
             WHERE pr.activo = 1
+              AND pr.accion = 'ALLOW'
         """)
         condiciones_rows = cursor.fetchall()
 
