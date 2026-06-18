@@ -88,11 +88,11 @@ CREATE TABLE IF NOT EXISTS `servidores` (
   COLLATE=utf8mb4_unicode_ci;
 
 INSERT INTO `servidores` (nombre_servidor, ip_servidor, mac_servidor, descripcion) VALUES
-('portal_cautivo',    '192.168.200.211',    '00:11:22:33:44:55', 'Portal Cautivo / NAS - RADIUS Client'),
-('dhcp_server',       '192.168.200.200',    '00:11:22:33:44:56', 'Servidor DHCP'),
+('portal_cautivo',    '192.168.100.2',    'fa:16:3e:df:01:af', 'Portal Cautivo / NAS - RADIUS Client'),
+('dhcp_server',       '192.168.200.200',  'fa:16:3e:a0:37:c0', 'Servidor DHCP'),
 ('srv1_academicos',   '192.168.100.101',  'fa:16:3e:05:3f:5f', 'Servidor de Cursos - Facultades'),  -- H3
 ('srv2_notas',        '192.168.100.102',  'fa:16:3e:00:9c:f3', 'Servidor de Notas - Admins'),     -- H4
-('gateway_internet',  '10.20.11.32',      '00:11:22:33:44:59', 'Gateway Internet');        -- Gateway
+('gateway_internet',  '192.168.100.1',    'fa:16:3e:4a:c5:c0', 'Gateway Internet');        -- Gateway
 
 -- ============================================================
 -- TABLA: recursos
