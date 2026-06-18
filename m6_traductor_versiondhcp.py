@@ -35,22 +35,23 @@ except ImportError:
 
 # ─── Configuración ────────────────────────────────────────────────────────────
 class Config:
-    # ONOS — corre en VM-Controller; M6 corre en VM-Auth y lo llama por red OOB
-    ONOS_URL  = "http://192.168.201.200:8181"
+    # ONOS (puerto 8181)
+    ONOS_URL  = "http://127.0.0.1:8181"
     ONOS_AUTH = ("onos", "rocks")
 
-    # OPA (M2) — corre en VM-Auth (misma VM que M6), puerto 8182
-    # sync.py empuja recursos/excepciones desde MySQL hacia OPA cada 30-300s
+    # OPA — puerto 8182 (distinto de ONOS que usa 8181)
+    # Endpoint real de M2: package policy → /v1/data/policy/result
     OPA_URL = "http://127.0.0.1:8182/v1/data/policy/result"
 
-    # Mapeo IPs diseño M2 (10.0.0.x) → IPs reales del slice
+    # Mapeo IPs diseño M2 (10.0.0.x) → IPs reales VNRT (192.168.100.x)
+    # M2's init.sql usa IPs del diseño original; VNRT tiene 2 servidores reales.
     IP_MAPPING_M2 = {
-        "10.0.0.21": "192.168.100.101",  # cursos_telecom → srv1
-        "10.0.0.22": "192.168.100.102",  # cursos_info    → srv2
-        "10.0.0.23": "192.168.100.101",  # cursos_electro → srv1
-        "10.0.0.30": "192.168.100.102",  # servidor_notas → srv2
-        "10.0.0.40": "192.168.100.102",  # panel_admin    → srv2
-        "10.0.0.10": "192.168.100.2",    # portal_cautivo → VM-Auth
+        "10.0.0.21": "192.168.100.200",  # cursos_telecom → H3
+        "10.0.0.22": "192.168.100.201",  # cursos_info    → H4 (VLAN 220)
+        "10.0.0.23": "192.168.100.200",  # cursos_electro → H3
+        "10.0.0.30": "192.168.100.201",  # servidor_notas → H4
+        "10.0.0.40": "192.168.100.201",  # panel_admin    → H4
+        "10.0.0.10": "192.168.100.1",    # portal_cautivo → controller
     }
 
     # M5 auditoría
@@ -71,32 +72,25 @@ class Config:
     BACKOFF_BASE   = 1        # segundos, backoff exponencial: 1→2→4
     MAX_COLA_LOGS  = 10000
 
-    # IPs del plano de datos (slice real asignado)
-    PORTAL_IP     = "192.168.100.2"    # VM-Auth — portal cautivo / RADIUS
-    SERVER_CURSOS = "192.168.100.101"  # srv1 — recursos_académicos
-    SERVER_NOTAS  = "192.168.100.102"  # srv2 — sistema_notas
+    # IPs del plano de datos (verificadas en el slice VNRT)
+    PORTAL_IP     = "192.168.100.1"    # controller / portal cautivo en ens4
+    SERVER_CURSOS = "192.168.100.200"  # H3 — servidor cursos (IP fija)
+    SERVER_NOTAS  = "192.168.100.201"  # H4 — servidor notas  (IP fija)
 
-    # DPIDs del slice real (5 switches)
-    SW1 = "of:00007e3892af7141"   # core (conectado a VM-Auth, VM-Controller, VM-Monitor)
-    SW2 = "of:0000e2ecb0ea0445"   # distribución
-    SW3 = "of:0000eadb63449748"   # distribución
-    SW4 = "of:00006a0757adfc4e"   # acceso hosts H1/H2/H3
-    SW5 = "of:0000ca126249d546"   # acceso servidores srv1/srv2
+    # DPIDs reales del slice VNRT
+    SW1 = "of:00005ec76ec6114c"   # core
+    SW2 = "of:000072e0807e854c"   # acceso hosts
+    SW3 = "of:0000f220f9454c4e"   # acceso servidores
 
     SWITCH_NOMBRES = {
-        "of:00007e3892af7141": "SW1",
-        "of:0000e2ecb0ea0445": "SW2",
-        "of:0000eadb63449748": "SW3",
-        "of:00006a0757adfc4e": "SW4",
-        "of:0000ca126249d546": "SW5",
+        "of:00005ec76ec6114c": "SW1",
+        "of:000072e0807e854c": "SW2",
+        "of:0000f220f9454c4e": "SW3",
     }
-
-    # Hosts conocidos para fallback (vacío — ONOS los descubre via hostprovider)
-    HOSTS_VNRT = {}
 
     # Prioridades OpenFlow (acordadas en diseño de arquitectura)
     PRIO_VLAN_PUSH  = 10      # T1: sin tag → PUSH VLAN 90
-    PRIO_DHCP       = 500     # T1: DHCP → CONTROLLER
+    PRIO_DHCP       = 500     # T0: DHCP → CONTROLLER (sin tag) 
     PRIO_PORTAL_T1  = 100     # T1: portal en cuarentena (tabla 1)
     PRIO_DROP_T1    = 5       # T1: DROP default cuarentena
     PRIO_SESION_T1  = 40000   # T1: SET_FIELD post-auth
@@ -144,14 +138,14 @@ class FlowBuilder:
         }
 
     def dhcp_al_controller(self, device_id):
-        """T0 prio500 — UDP dst=67 → CONTROLLER (sin VLAN_VID).
-        Fix: DHCP llega sin tag VLAN al access switch; en T1 nunca era alcanzado."""
+        """T0 prio500 — VLAN 90 + UDP dst=67 → CONTROLLER."""
         return {
             "priority":    Config.PRIO_DHCP,
             "isPermanent": True,
             "deviceId":    device_id,
             "tableId":     0,
             "selector": {"criteria": [
+                {"type": "VLAN_VID", "vlanId": Config.VLAN_CUARENTENA},
                 {"type": "ETH_TYPE", "ethType": "0x0800"},
                 {"type": "IP_PROTO", "protocol": 17},
                 {"type": "UDP_DST",  "udpPort": 67}
@@ -159,23 +153,6 @@ class FlowBuilder:
             "treatment": {"instructions": [
                 {"type": "OUTPUT", "port": "CONTROLLER"}
             ]}
-        }
-
-    def bloqueo_servidor_cuarentena(self, device_id, ip_servidor):
-        """T1 prio70 — VLAN 90 + dst=servidor_académico → DROP.
-        Bloqueo explícito durante cuarentena: aunque otro flow haga NORMAL,
-        los servidores académicos no son alcanzables sin autenticar."""
-        return {
-            "priority":    70,
-            "isPermanent": True,
-            "deviceId":    device_id,
-            "tableId":     1,
-            "selector": {"criteria": [
-                {"type": "VLAN_VID", "vlanId": Config.VLAN_CUARENTENA},
-                {"type": "ETH_TYPE", "ethType": "0x0800"},
-                {"type": "IPV4_DST", "ip": f"{ip_servidor}/32"}
-            ]},
-            "treatment": {"clearDeferred": True, "instructions": []}
         }
 
     def portal_cuarentena_t1(self, device_id, ip_portal=None):
@@ -393,7 +370,7 @@ class FlowBuilder:
         }
 
     def t0_return_flow(self, device_id, dst_mac, out_port, session_timeout=28800):
-        """T0 prio200 — respuesta de servidores → host por ETH_DST (sin restricción de IN_PORT)."""
+        """T0 prio200 — respuesta de servidores → host (IN_PORT=1=uplink, ETH_DST=MAC)."""
         return {
             "priority":    200,
             "isPermanent": False,
@@ -401,29 +378,13 @@ class FlowBuilder:
             "deviceId":    device_id,
             "tableId":     0,
             "selector": {"criteria": [
+                {"type": "IN_PORT",  "port": 1},
                 {"type": "ETH_TYPE", "ethType": "0x0800"},
                 {"type": "ETH_DST",  "mac":  dst_mac}
             ]},
             "treatment": {"instructions": [
                 {"type": "OUTPUT", "port": out_port}
             ]}
-        }
-
-    def t0_return_portal_flow(self, device_id, portal_ip):
-        """T0 prio199 — respuesta del portal (IPV4_SRC=portal) → NORMAL.
-        Permanente. Sin IN_PORT: el SYN-ACK llega por trunk port (variable).
-        Prio 199 < 200 (portal dst) para no interceptar tráfico hacia el portal."""
-        return {
-            "priority":    199,
-            "isPermanent": True,
-            "timeout":     0,
-            "deviceId":    device_id,
-            "tableId":     0,
-            "selector": {"criteria": [
-                {"type": "ETH_TYPE", "ethType": "0x0800"},
-                {"type": "IPV4_SRC", "ip": f"{portal_ip}/32"},
-            ]},
-            "treatment": {"instructions": [{"type": "OUTPUT", "port": "NORMAL"}]}
         }
 
 
@@ -604,10 +565,16 @@ class PolicyEngine:
                 ],
                 "denegaciones": []
             }
-        else:                              # Visitante
+        else:   # Visitante
+            # TODO: Visitante debería tener acceso a internet externo (VLAN 100 → gateway)
+            # Requiere configurar NAT en el controller (192.168.201.210 vía ens3)
+            # que está fuera del plano SDN. Por ahora se permite acceso al portal únicamente.
             return {
-                "permisos":    [{"ip_dst": cursos, "puertos": [80]}],
-                "denegaciones":[]
+                "permisos":    [],
+                "denegaciones": [
+                    {"ip_dst": Config.SERVER_CURSOS, "puertos": [80, 443]},
+                    {"ip_dst": Config.SERVER_NOTAS,  "puertos": [80, 443]}
+                ]
             }
 
 
@@ -686,7 +653,7 @@ class ONOSClient:
     def get_host_by_ip(self, ip_asignada):
         """
         Busca host en ONOS por IP → {mac, switch_dpid, in_port}.
-        Si ONOS no lo tiene (IP asignada fuera de ONOS DHCP), usa HOSTS_VNRT.
+        ONOS aprende los hosts dinámicamente vía DHCP.
         """
         try:
             resp = requests.get(
@@ -705,15 +672,9 @@ class ONOSClient:
         except Exception as e:
             print(f"  [ONOS] Error GET /hosts: {e}")
 
-        # Fallback a hosts conocidos del slice
-        if ip_asignada in Config.HOSTS_VNRT:
-            h = Config.HOSTS_VNRT[ip_asignada]
-            print(f"  [ONOS] Fallback VNRT para {ip_asignada}: mac={h['mac']}")
-            return dict(h)
-
-        print(f"  [ONOS] Host {ip_asignada} no encontrado")
+        print(f"  [ONOS] Host {ip_asignada} no encontrado en ONOS")
         return None
-
+       
     def get_devices(self):
         """Lista de deviceIds disponibles en ONOS."""
         try:
@@ -802,126 +763,108 @@ class M6Translator:
 
     def instalar_cuarentena_arranque(self):
         """
-        Instala flows proactivos al arrancar. Clasificación DINÁMICA de switches:
-          - ACCESO: tiene puertos no-trunk (detectados via LLDP) → enforcement + VLAN push
-          - TRÁNSITO: todos sus puertos son trunk → table-miss NORMAL
-
-        No se hardcodea qué switch es SW4 vs SW1. La lógica funciona con cualquier
-        topología que ONOS vea via LLDP.
+        Instala al arrancar:
+          1. T1 cuarentena en todos los switches (VLAN 90)
+          2. T0 rutas directas portal en SW1 y SW2 (funcionan en VNRT)
+          3. T2 ALLOW proactivo por VLAN → servidor en SW2
         """
-        devices = self.onos.get_devices()
+        devices     = self.onos.get_devices()
+        devices_set = set(devices)
         SEP = "─" * 47
 
         print(f"\n[M6] {SEP}")
         print(f"[M6]  Cuarentena arranque — {len(devices)} switch(es)")
         print(f"[M6] {SEP}")
 
-        # Clasificar DINÁMICAMENTE: acceso vs tránsito según puertos LLDP
-        access_switches  = {}   # device_id → [puertos_acceso]
-        transit_switches = []   # device_id
+        # T1: Cuarentena VLAN 90 en todos los switches
+        # VLAN push solo en SW2 (host access); puertos descubiertos dinámicamente
+        sw2_access_ports = (self.onos.get_access_ports(Config.SW2)
+                            if Config.SW2 in devices_set else [])
 
-        print(f"\n  Clasificando switches (LLDP):")
         for device_id in devices:
-            nombre  = Config.SWITCH_NOMBRES.get(device_id, device_id[-4:])
-            puertos = self.onos.get_access_ports(device_id)
-            if puertos:
-                access_switches[device_id] = puertos
-                print(f"    {nombre}: ACCESO  puertos={puertos}")
-            else:
-                transit_switches.append(device_id)
-                print(f"    {nombre}: TRÁNSITO")
+            nombre = Config.SWITCH_NOMBRES.get(device_id, device_id)
+            print(f"\n  → {nombre}")
 
-        PORTAL_IP    = Config.PORTAL_IP
-        SRV_CURSOS   = Config.SERVER_CURSOS
-        SRV_NOTAS    = Config.SERVER_NOTAS
-
-        # ── T0: DHCP → CONTROLLER en TODOS (sin VLAN_VID — llega sin tag) ────
-        print(f"\n  [T0] DHCP → CONTROLLER:")
-        for device_id in devices:
-            nombre = Config.SWITCH_NOMBRES.get(device_id, device_id[-4:])
-            self.onos.instalar_flow(device_id, self.builder.dhcp_al_controller(device_id))
-            print(f"    ✓ {nombre}")
-
-        # ── T0: ARP pass-through en TODOS ─────────────────────────────────────
-        print(f"\n  [T0] ARP pass-through:")
-        for device_id in devices:
-            nombre = Config.SWITCH_NOMBRES.get(device_id, device_id[-4:])
-            self.onos.instalar_flow(device_id, self.builder.t0_allow_arp(device_id))
-            print(f"    ✓ {nombre}")
-
-        # ── T0: Table-miss NORMAL en switches de TRÁNSITO ────────────────────
-        # En acceso se omite: el default DROP fuerza enforcement.
-        print(f"\n  [T0] Table-miss NORMAL (tránsito):")
-        for device_id in transit_switches:
-            nombre = Config.SWITCH_NOMBRES.get(device_id, device_id[-4:])
-            self.onos.instalar_flow(device_id, self.builder.t0_table_miss_normal(device_id))
-            print(f"    ✓ {nombre}")
-
-        # ── T0: Rutas portal en switches de ACCESO ────────────────────────────
-        # En cada puerto de acceso: dst=portal → NORMAL (OVS L2 routing hacia VM-Auth)
-        print(f"\n  [T0] Rutas portal ({PORTAL_IP}) en acceso:")
-        for device_id, puertos_acceso in access_switches.items():
-            nombre = Config.SWITCH_NOMBRES.get(device_id, device_id[-4:])
-            for puerto in puertos_acceso:
-                flow = self.builder.ruta_directa_t0(
-                    device_id, puerto, "dst", PORTAL_IP, "NORMAL",
-                    prio=Config.PRIO_T0_PORTAL
-                )
-                self.onos.instalar_flow(device_id, flow)
-            print(f"    ✓ {nombre} puertos={puertos_acceso}")
-
-        # ── T0: Return flow portal en switches de ACCESO ──────────────────────
-        # El SYN-ACK del portal llega por trunk (in_port variable) → no hay flow
-        # que lo maneje → DROP. Este flow permanente prio=199 lo captura por src IP.
-        print(f"\n  [T0] Return flow portal ({PORTAL_IP} → hosts):")
-        for device_id in access_switches:
-            nombre = Config.SWITCH_NOMBRES.get(device_id, device_id[-4:])
             self.onos.instalar_flow(device_id,
-                self.builder.t0_return_portal_flow(device_id, PORTAL_IP))
-            print(f"    ✓ {nombre}")
-
-        # ── T1: Cuarentena VLAN 90 en TODOS + VLAN push en ACCESO ────────────
-        print(f"\n  [T1] Cuarentena VLAN 90:")
-        for device_id in devices:
-            nombre = Config.SWITCH_NOMBRES.get(device_id, device_id[-4:])
-            # DROP explícito de servidores académicos en cuarentena (hardening)
-            self.onos.instalar_flow(device_id,
-                self.builder.bloqueo_servidor_cuarentena(device_id, SRV_CURSOS))
-            self.onos.instalar_flow(device_id,
-                self.builder.bloqueo_servidor_cuarentena(device_id, SRV_NOTAS))
+                self.builder.dhcp_al_controller(device_id))
             self.onos.instalar_flow(device_id,
                 self.builder.portal_cuarentena_t1(device_id))
             self.onos.instalar_flow(device_id,
                 self.builder.drop_default_cuarentena(device_id))
-            # VLAN push solo en puertos de acceso (hacia hosts)
-            if device_id in access_switches:
-                for puerto in access_switches[device_id]:
+            if device_id == Config.SW2:
+                for puerto in sw2_access_ports:
                     self.onos.instalar_flow(device_id,
                         self.builder.vlan_push_cuarentena(device_id, puerto))
-                print(f"    ✓ {nombre} (VLAN push p{access_switches[device_id]})")
-            else:
-                print(f"    ✓ {nombre}")
+                print(f"    T1 VLAN push cuarentena → puertos acceso: {sw2_access_ports}")
 
-        # ── T2: ALLOW proactivo por VLAN en switches de ACCESO ───────────────
+        # T0: Rutas directas portal (tabla 0) — verificadas con SSH H1→portal
+        #  Forward: SW2 IN_PORT=<acceso>, dst=portal → OUTPUT 1 (dinámico por host)
+        #           SW1 IN_PORT=2, dst=portal → OUTPUT 1 (hacia ctrl/portal)
+        #  Return:  SW1 IN_PORT=1, src=portal → OUTPUT 2 (hacia SW2)
+        #           SW2 IN_PORT=1, src=portal → NORMAL   (OVS L2 entrega al host correcto)
+        PORTAL_IP   = Config.PORTAL_IP
+        rutas_portal = [
+            (Config.SW2, p, "dst", PORTAL_IP, 1, f"SW2 p{p}→portal")
+            for p in sw2_access_ports
+        ] + [
+            (Config.SW2, 1, "src", PORTAL_IP, "NORMAL", "SW2 portal→hosts NORMAL"),
+            (Config.SW1, 2, "dst", PORTAL_IP, 1,        "SW1 SW2→ctrl"),
+            (Config.SW1, 1, "src", PORTAL_IP, 2,        "SW1 ctrl→SW2"),
+        ]
+        print(f"\n  [T0] Rutas directas portal ({PORTAL_IP}):")
+        for dpid, in_port, tipo, ip, out_port, desc in rutas_portal:
+            if dpid in devices_set:
+                flow = self.builder.ruta_directa_t0(
+                    dpid, in_port, tipo, ip, out_port,
+                    prio=Config.PRIO_T0_PORTAL
+                )
+                self.onos.instalar_flow(dpid, flow)
+                print(f"    ✓ {desc}")
+            else:
+                sw = Config.SWITCH_NOMBRES.get(dpid, dpid)
+                print(f"    ⚠  {sw} no disponible — omitiendo: {desc}")
+
+        # T0: ARP pass-through en todos los switches (necesario para resolución MAC)
+        print(f"\n  [T0] ARP pass-through (0x0806 → NORMAL):")
+        for device_id in devices:
+            nombre = Config.SWITCH_NOMBRES.get(device_id, device_id)
+            self.onos.instalar_flow(device_id, self.builder.t0_allow_arp(device_id))
+            print(f"    ✓ {nombre}")
+
+        # T0: table-miss NORMAL en SW1 y SW3 (switches de tránsito — no hacen enforcement)
+        # Sin esto, el tráfico de H1→H3 se pierde al no matchear ningún flow en SW1/SW3.
+        print(f"\n  [T0] Table-miss NORMAL en switches de tránsito (SW1, SW3):")
+        for device_id in [Config.SW1, Config.SW3]:
+            if device_id in devices_set:
+                self.onos.instalar_flow(device_id,
+                    self.builder.t0_table_miss_normal(device_id))
+                nombre = Config.SWITCH_NOMBRES.get(device_id, device_id)
+                print(f"    ✓ {nombre}")
+            else:
+                nombre = Config.SWITCH_NOMBRES.get(device_id, device_id)
+                print(f"    ⚠  {nombre} no disponible")
+
+        # T2: ALLOW proactivo por VLAN (tabla 2, permanente, instalado una vez)
         POLITICAS_T2 = [
-            (210, SRV_CURSOS, "Est.Telecom → srv1 cursos"),
-            (220, SRV_NOTAS,  "Est.Informatica → srv2 notas"),
-            (230, SRV_CURSOS, "Est.Electronica → srv1 cursos"),
-            (300, SRV_CURSOS, "Docente → srv1 cursos"),
-            (300, SRV_NOTAS,  "Docente → srv2 notas"),
-            (400, SRV_CURSOS, "Admin_TI → srv1 cursos"),
-            (400, SRV_NOTAS,  "Admin_TI → srv2 notas"),
+            (210, Config.SERVER_CURSOS, "Est.Telecom → H3 cursos_telecom"),
+            (220, Config.SERVER_NOTAS,  "Est.Informatica → H4 cursos_info"),
+            (230, Config.SERVER_CURSOS, "Est.Electronica → H3 cursos_electro"),
+            (300, Config.SERVER_CURSOS, "Docente → H3 cursos"),
+            (300, Config.SERVER_NOTAS,  "Docente → H4 notas"),
+            (400, Config.SERVER_CURSOS, "Admin_TI → H3 cursos"),
+            (400, Config.SERVER_NOTAS,  "Admin_TI → H4 notas"),
         ]
         print(f"\n  [T2] Políticas VLAN proactivas (tabla 2):")
-        for device_id in access_switches:
-            nombre = Config.SWITCH_NOMBRES.get(device_id, device_id[-4:])
-            for vlan, ip_dst, _ in POLITICAS_T2:
+        if Config.SW2 in devices_set:
+            for vlan, ip_dst, desc in POLITICAS_T2:
                 for tcp_port in [80, 443]:
                     self.onos.instalar_flow(
-                        device_id,
-                        self.builder.t2_allow_vlan(device_id, vlan, ip_dst, tcp_port)
+                        Config.SW2,
+                        self.builder.t2_allow_vlan(Config.SW2, vlan, ip_dst, tcp_port)
                     )
-            print(f"    ✓ {nombre} ({len(POLITICAS_T2)} políticas × 2 puertos TCP)")
+                print(f"    ✓ VLAN {vlan} → {ip_dst}  [{desc}]")
+        else:
+            print("    ⚠  SW2 no disponible — T2 omitido")
 
         print(f"\n[M6] {SEP}")
         print("[M6]  Arranque completado")
@@ -932,34 +875,26 @@ class M6Translator:
     def procesar_token_rol(self, token):
         """
         Punto de entrada desde M1 tras autenticación exitosa.
-        token = {codigo_pucp, nombre_rol, vlan_id, ip_asignada}
-        Retorna {mac, switch_dpid, in_port} para que M1 registre la sesión.
+        token = {codigo_pucp, nombre_rol, vlan_id, ip_asignada,
+                mac, switch_dpid, in_port}
+        M1 ya resolvió el host vía /m6/resolver_host antes de llamar aquí.
+        Instala flows en ONOS y retorna {"ok": True}.
         """
         codigo_pucp = token["codigo_pucp"]
         nombre_rol  = token["nombre_rol"]
         vlan_id     = int(token["vlan_id"])
         ip_asignada = token["ip_asignada"]
+        mac         = token["mac"]
+        switch_dpid = token["switch_dpid"]
+        in_port     = int(token["in_port"])
 
+        nombre_sw = Config.SWITCH_NOMBRES.get(switch_dpid, switch_dpid[-8:])
         print(f"\n[M6] ── Token de M1 ──────────────────────────────")
         print(f"  usuario={codigo_pucp}  rol={nombre_rol}  "
-              f"vlan={vlan_id}  ip={ip_asignada}")
-
-        # 1. Resolver host: ONOS GET /hosts → fallback VNRT
-        host = self.onos.get_host_by_ip(ip_asignada)
-        if not host:
-            self.logger.log({
-                "modulo": "M6", "evento": "error_host_no_encontrado",
-                "ip": ip_asignada, "usuario": codigo_pucp
-            })
-            return None
-
-        mac         = host["mac"]
-        switch_dpid = host["switch_dpid"]
-        in_port     = host["in_port"]
-        nombre_sw   = Config.SWITCH_NOMBRES.get(switch_dpid, switch_dpid)
+            f"vlan={vlan_id}  ip={ip_asignada}")
         print(f"  host: mac={mac}  switch={nombre_sw}  puerto={in_port}")
 
-        # 2. T1 SET_FIELD: VLAN 90 → vlan_id del rol (tabla 1, per-sesión)
+        # 1. T1 SET_FIELD: VLAN 90 → vlan_id del rol
         print(f"  [T1] SET_FIELD VLAN {Config.VLAN_CUARENTENA}→{vlan_id}...")
         self._instalar_y_cachear(
             switch_dpid,
@@ -967,8 +902,7 @@ class M6Translator:
             mac
         )
 
-        # T0 return flow: respuestas de servidores → host (instalado per-sesión)
-        # IN_PORT=1 = uplink de SW1; ETH_DST=MAC del host; OUTPUT=puerto del host
+        # T0 return flow: respuestas de servidores → host
         print(f"  [T0] Return flow → puerto {in_port}...")
         self._instalar_y_cachear(
             switch_dpid,
@@ -976,7 +910,7 @@ class M6Translator:
             mac
         )
 
-        # 3. Obtener políticas (OPA → MySQL → hardcoded)
+        # 2. Obtener políticas (OPA → MySQL → hardcoded)
         payload_opa = {
             "input": {
                 "codigo_pucp": codigo_pucp,
@@ -989,17 +923,16 @@ class M6Translator:
         }
         politicas = self.policies.get_policies(payload_opa)
 
-        # 4. Instalar flows de política
+        # 3. Instalar flows de política
         n_allow, n_deny = 0, 0
         print(f"  Instalando enforcement...")
 
         for permiso in politicas.get("permisos", []):
             ip_dst = permiso["ip_dst"]
-            # T0 ALLOW por MAC: enforcement real en VNRT (tabla 0, prio 35000)
             self._instalar_y_cachear(
                 switch_dpid,
                 self.builder.t0_allow_usuario(
-                    switch_dpid, mac, ip_dst, out_port="NORMAL"
+                    switch_dpid, mac, ip_dst, out_port=1
                 ),
                 mac
             )
@@ -1007,13 +940,11 @@ class M6Translator:
 
         for denegacion in politicas.get("denegaciones", []):
             ip_dst = denegacion["ip_dst"]
-            # T3 DENY arquitectural (tabla 3) — visible en ONOS
             self._instalar_y_cachear(
                 switch_dpid,
                 self.builder.t3_deny_sesion(switch_dpid, mac, ip_asignada, ip_dst),
                 mac
             )
-            # T0 DENY por MAC: enforcement real en VNRT (tabla 0, prio 35000)
             self._instalar_y_cachear(
                 switch_dpid,
                 self.builder.t0_deny_usuario(switch_dpid, mac, ip_dst),
@@ -1023,25 +954,16 @@ class M6Translator:
 
         n_total = len(self.flows_por_sesion.get(mac, []))
         print(f"  ✓ Sesión activada — {n_total} flows  "
-              f"(T1:1  T0-ALLOW:{n_allow}  T3+T0-DENY:{n_deny*2})")
+            f"(T1:1  T0-ALLOW:{n_allow}  T3+T0-DENY:{n_deny*2})")
 
         self.logger.log({
-            "modulo":    "M6",
-            "evento":    "sesion_activada",
-            "usuario":   codigo_pucp,
-            "rol":       nombre_rol,
-            "vlan":      vlan_id,
-            "mac":       mac,
-            "switch":    switch_dpid,
-            "puerto":    in_port,
-            "n_flows":   n_total
+            "modulo":  "M6", "evento": "sesion_activada",
+            "usuario": codigo_pucp, "rol": nombre_rol,
+            "vlan":    vlan_id, "mac": mac,
+            "switch":  switch_dpid, "puerto": in_port,
+            "n_flows": n_total
         })
-
-        return {
-            "mac":         mac,
-            "switch_dpid": switch_dpid,
-            "in_port":     in_port
-        }
+        return {"ok": True}
 
     # ── Cierre de sesión ──────────────────────────────────────────────────────
 
@@ -1094,14 +1016,35 @@ class M6Translator:
 app = Flask(__name__)
 m6  = M6Translator()
 
+# se añade un nuevo end point  para conocer el dpid, port y mac del user antes de mandar el token 
+# a m6 y valisar sus campos de sesiones activas y ip_mac binding
+@app.route("/m6/resolver_host", methods=["POST"])
+def endpoint_resolver_host():
+    """
+    M1 llama aquí ANTES de registrar la sesión en DB.
+    Solo consulta ONOS y devuelve {mac, switch_dpid, in_port}.
+    No instala ningún flow.
+    """
+    data = request.json or {}
+    ip_asignada = data.get("ip_asignada")
+    if not ip_asignada:
+        return jsonify({"error": "falta campo: ip_asignada"}), 400
+    host = m6.onos.get_host_by_ip(ip_asignada)
+    if not host:
+        return jsonify({"error": f"host {ip_asignada} no encontrado"}), 404
+    return jsonify(host), 200
 
 @app.route("/m6/token_rol", methods=["POST"])
 def endpoint_token_rol():
-    """M1 llama aquí después de autenticar exitosamente al usuario."""
+    """
+    M1 llama aquí DESPUÉS de registrar la sesión en DB.
+    Recibe token completo e instala flows en ONOS.
+    """
     token = request.json
     if not token:
         return jsonify({"error": "body vacío"}), 400
-    for campo in ("codigo_pucp", "nombre_rol", "vlan_id", "ip_asignada"):
+    for campo in ("codigo_pucp", "nombre_rol", "vlan_id",
+                  "ip_asignada", "mac", "switch_dpid", "in_port"):
         if campo not in token:
             return jsonify({"error": f"falta campo: {campo}"}), 400
     resultado = m6.procesar_token_rol(token)

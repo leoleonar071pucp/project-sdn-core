@@ -5,9 +5,10 @@
 LOG=/tmp
 
 echo "=== Deteniendo procesos previos ==="
-pkill -f "opa run"         2>/dev/null && echo "  OPA detenido"   || true
-pkill -f "sync\.py"        2>/dev/null && echo "  sync.py detenido" || true
-pkill -f "m6_traductor\.py" 2>/dev/null && echo "  M6 detenido"   || true
+pkill -f "opa run"          2>/dev/null && echo "  OPA detenido"      || true
+pkill -f "sync\.py"         2>/dev/null && echo "  sync.py detenido"  || true
+pkill -f "m6_traductor\.py" 2>/dev/null && echo "  M6 detenido"      || true
+pkill -f "portal_web\.py"   2>/dev/null && echo "  portal_web detenido" || true
 sleep 1
 
 echo ""
@@ -29,6 +30,11 @@ nohup python3 -u /root/m6_traductor.py > $LOG/m6.log 2>&1 &
 echo "  PID $! — $LOG/m6.log"
 
 echo ""
+echo "=== [4/4] Portal Web (M1) en puerto 80 ==="
+nohup python3 -u /root/portal_web.py > $LOG/portal_web.log 2>&1 &
+echo "  PID $! — $LOG/portal_web.log"
+
+echo ""
 echo "=== Esperando arranque M6 ==="
 for i in $(seq 1 10); do
     sleep 2
@@ -48,8 +54,8 @@ ps aux | grep -E "opa|sync\.py|m6_traductor" | grep -v grep | \
 echo ""
 echo "Logs en vivo:"
 echo "  tail -f $LOG/m6.log"
+echo "  tail -f $LOG/portal_web.log"
 echo "  tail -f $LOG/sync.log"
 echo "  tail -f $LOG/opa.log"
 echo ""
-echo "Portal cautivo (manual, en nueva terminal SSH):"
-echo "  python3 /root/portal_cautivo.py"
+echo "Portal web corriendo en: http://192.168.100.2:80"

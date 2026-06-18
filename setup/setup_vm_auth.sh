@@ -8,6 +8,17 @@ set -e
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SQL_FILE="$REPO_DIR/sql/radius_db_pucp_sdn (2).sql"
 
+echo "=== [0/6] DNS y hostname ==="
+# Ubuntu 24.04: resolv.conf apunta a stub localhost → sin internet → apt/pip fallan
+rm -f /etc/resolv.conf
+printf "nameserver 8.8.8.8\nnameserver 8.8.4.4\n" > /etc/resolv.conf
+# FreeRADIUS falla al arrancar si no puede resolver su propio hostname
+if ! grep -q "aaa-policies" /etc/hosts 2>/dev/null; then
+    echo "127.0.1.1 aaa-policies" >> /etc/hosts
+fi
+echo "  OK"
+
+echo ""
 echo "=== [1/6] Paquetes ==="
 apt-get update -q
 apt-get install -y -q mysql-server freeradius freeradius-mysql python3-pip curl wget
@@ -46,6 +57,11 @@ sql {
     password  = "radius_pass"
     radius_db = "radius_db"
 
+    # CRÍTICO: sin estas líneas queries.conf usa strings vacíos → [sql] = notfound
+    sql_user_name    = "%{User-Name}"
+    client_table     = "nas"
+    group_attribute  = "SQL-Group"
+
     acct_table1      = "radacct"
     acct_table2      = "radacct"
     postauth_table   = "radpostauth"
@@ -70,6 +86,9 @@ sql {
     }
 
     logfile = ${logdir}/sqllog.sql
+
+    # CRÍTICO: sin este include, todas las queries de grupos/auth quedan vacías
+    $INCLUDE ${modconfdir}/${.:name}/main/${dialect}/queries.conf
 }
 FRSQL
 
@@ -127,8 +146,9 @@ server default {
 }
 FRSITE
 
-# Deshabilitar inner-tunnel (no se usa, evita errores de EAP)
+# Deshabilitar inner-tunnel y EAP (usamos solo PAP; EAP genera errores de certificados)
 rm -f /etc/freeradius/3.0/sites-enabled/inner-tunnel
+rm -f /etc/freeradius/3.0/mods-enabled/eap
 
 systemctl restart freeradius
 systemctl enable freeradius
@@ -155,16 +175,22 @@ echo "  policy.rego → /root/m2/"
 
 echo ""
 echo "=== [5/6] Python deps ==="
-pip3 install -q flask requests mysql-connector-python pyrad pymysql
+# Ubuntu 24.04: Python externally-managed → requiere --break-system-packages
+# blinker ya viene con el sistema → --ignore-installed evita conflicto
+pip3 install flask requests mysql-connector-python pyrad pymysql \
+    --break-system-packages --ignore-installed blinker
 echo "  OK — flask requests mysql-connector-python pyrad pymysql"
 
 echo ""
 echo "=== [6/6] Archivos de producción → /root/ ==="
 cp "$REPO_DIR/app/modules/m6/m6_traductor.py"             /root/m6_traductor.py
 cp "$REPO_DIR/portal_cautivo.py"                           /root/portal_cautivo.py
+cp "$REPO_DIR/portal_web.py"                               /root/portal_web.py
+mkdir -p /root/m2
 cp "$REPO_DIR/app/modules/m2_policies/sync/sync.py"       /root/m2/sync.py
 echo "  /root/m6_traductor.py"
 echo "  /root/portal_cautivo.py"
+echo "  /root/portal_web.py"
 echo "  /root/m2/sync.py"
 
 echo ""
