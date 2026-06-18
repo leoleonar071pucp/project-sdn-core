@@ -20,6 +20,7 @@ NOTA VNRT: el tráfico IP normal de los hosts no llega a tabla-1 automáticament
            (verificado con SSH desde H1 a 192.168.100.1).
 """
 
+import os
 import time
 import threading
 import requests
@@ -36,7 +37,8 @@ except ImportError:
 # ─── Configuración ────────────────────────────────────────────────────────────
 class Config:
     # ONOS — corre en VM-Controller; M6 corre en VM-Auth y lo llama por red OOB
-    ONOS_URL  = "http://192.168.201.200:8181"
+    # Configurable via env: ONOS_URL=http://192.168.201.200:8181
+    ONOS_URL  = os.environ.get("ONOS_URL", "http://192.168.201.200:8181")
     ONOS_AUTH = ("onos", "rocks")
 
     # OPA (M2) — corre en VM-Auth (misma VM que M6), puerto 8182
@@ -44,14 +46,17 @@ class Config:
     OPA_URL = "http://127.0.0.1:8182/v1/data/policy/result"
 
     # Mapeo IPs diseño M2 (10.0.0.x) → IPs reales del slice
-    IP_MAPPING_M2 = {
-        "10.0.0.21": "192.168.100.101",  # cursos_telecom → srv1
-        "10.0.0.22": "192.168.100.102",  # cursos_info    → srv2
-        "10.0.0.23": "192.168.100.101",  # cursos_electro → srv1
-        "10.0.0.30": "192.168.100.102",  # servidor_notas → srv2
-        "10.0.0.40": "192.168.100.102",  # panel_admin    → srv2
-        "10.0.0.10": "192.168.100.2",    # portal_cautivo → VM-Auth
-    }
+    # Usa las mismas env vars que PORTAL_IP/SERVER_CURSOS/SERVER_NOTAS
+    @classmethod
+    def get_ip_mapping_m2(cls):
+        return {
+            "10.0.0.21": cls.SERVER_CURSOS,  # cursos_telecom → srv1
+            "10.0.0.22": cls.SERVER_NOTAS,   # cursos_info    → srv2
+            "10.0.0.23": cls.SERVER_CURSOS,  # cursos_electro → srv1
+            "10.0.0.30": cls.SERVER_NOTAS,   # servidor_notas → srv2
+            "10.0.0.40": cls.SERVER_NOTAS,   # panel_admin    → srv2
+            "10.0.0.10": cls.PORTAL_IP,      # portal_cautivo → VM-Auth
+        }
 
     # M5 auditoría
     M5_URL = "http://127.0.0.1:5002/m5/log"
@@ -71,18 +76,16 @@ class Config:
     BACKOFF_BASE   = 1        # segundos, backoff exponencial: 1→2→4
     MAX_COLA_LOGS  = 10000
 
-    # IPs del plano de datos (slice real asignado)
-    PORTAL_IP     = "192.168.100.2"    # VM-Auth — portal cautivo / RADIUS
-    SERVER_CURSOS = "192.168.100.101"  # srv1 — recursos_académicos
-    SERVER_NOTAS  = "192.168.100.102"  # srv2 — sistema_notas
+    # IPs del plano de datos — configurables via variables de entorno.
+    # Si el slice cambia de IPs, solo hay que setear las vars antes de arrancar M6:
+    #   export PORTAL_IP=192.168.100.2 SERVER_CURSOS=192.168.100.101 SERVER_NOTAS=192.168.100.102
+    PORTAL_IP     = os.environ.get("PORTAL_IP",     "192.168.100.2")    # VM-Auth
+    SERVER_CURSOS = os.environ.get("SERVER_CURSOS", "192.168.100.101")  # srv1
+    SERVER_NOTAS  = os.environ.get("SERVER_NOTAS",  "192.168.100.102")  # srv2
 
-    # DPIDs del slice real (5 switches)
-    SW1 = "of:00007e3892af7141"   # core (conectado a VM-Auth, VM-Controller, VM-Monitor)
-    SW2 = "of:0000e2ecb0ea0445"   # distribución
-    SW3 = "of:0000eadb63449748"   # distribución
-    SW4 = "of:00006a0757adfc4e"   # acceso hosts H1/H2/H3
-    SW5 = "of:0000ca126249d546"   # acceso servidores srv1/srv2
-
+    # DPIDs — NO se usan en lógica de flujos (los descubre get_devices() de ONOS).
+    # SWITCH_NOMBRES es solo para logs. Si el slice cambia de DPIDs, los logs
+    # mostrarán los últimos 4 chars del DPID en lugar del nombre — funciona igual.
     SWITCH_NOMBRES = {
         "of:00007e3892af7141": "SW1",
         "of:0000e2ecb0ea0445": "SW2",
@@ -504,7 +507,7 @@ class PolicyEngine:
 
     def _normalizar_ip(self, ip_raw):
         """Traduce IPs del diseño M2 (10.0.0.x) a IPs reales VNRT."""
-        return Config.IP_MAPPING_M2.get(ip_raw, ip_raw)
+        return Config.get_ip_mapping_m2().get(ip_raw, ip_raw)
 
     def _convertir_permisos_m2(self, m2_permisos, vlan_id):
         """
