@@ -1,0 +1,14 @@
+dpdk:
+  pci_address: "0000:00:08.0"
+  mbuf_pool_size: 8192
+thresholds:
+  flood_dst_flows: 100
+  fast_scan_src_flows: 10
+  unidir_ratio: 0.9
+  vertical_scan_dst_ports: 15
+  global_scan_ports: 50
+idle_timeout_s: 5
+host_idle_timeout_s: 300
+max_flows: 100000
+max_hosts: 5000
+alert_endpoint: "http://localhost:8080/alerts"
