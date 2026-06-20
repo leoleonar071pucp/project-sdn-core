@@ -1,0 +1,53 @@
+version: "3.8"
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: m2-db
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: radius_db
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-prootpass"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  opa:
+    image: openpolicyagent/opa:0.68.0
+    container_name: m2-opa
+    ports:
+      - "8182:8181" # Anteriormente estaba 8181:8181, 
+                    # el cambio es para evitar conflicto de puerto con ONOS en la misma vm
+    volumes:
+      - ./opa/policy.rego:/workspace/policy.rego:ro
+    command: run --server /workspace/policy.rego
+    depends_on:
+      - db
+
+  sync:
+    build: ./sync
+    container_name: m2-sync
+    restart: unless-stopped
+    environment:
+      DB_HOST: db
+      DB_NAME: radius_db
+      DB_USER: root
+      DB_PASSWORD: rootpass
+      OPA_URL: http://opa:8181
+      RESOURCES_SYNC_INTERVAL: 300
+      EXCEPTIONS_SYNC_INTERVAL: 30
+    depends_on:
+      db:
+        condition: service_healthy
+      opa:
+        condition: service_started
+
+volumes:
+  mysql_data:
