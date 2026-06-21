@@ -607,10 +607,10 @@ GRANT SELECT ON radius_db.recursos          TO 'radius'@'localhost';
 GRANT SELECT ON radius_db.roles_facultad    TO 'radius'@'localhost';
 GRANT SELECT ON radius_db.servidores        TO 'radius'@'localhost';
 
---'radius' solo tenia SELECT en estas dos tablas, pero el flujo
---de visitante necesita escribir credenciales temporales (insertar al
---autenticar, borrar al cerrar sesion). Sin esto, las operaciones de
---escritura sobre radcheck/radusergroup fallaban por falta de permisos
+-- 'radius' solo tenia SELECT en estas dos tablas, pero el flujo
+-- de visitante necesita escribir credenciales temporales (insertar al
+-- autenticar, borrar al cerrar sesion). Sin esto, las operaciones de
+-- escritura sobre radcheck/radusergroup fallaban por falta de permisos
 GRANT SELECT ON radius_db.radcheck             TO 'radius'@'localhost';
 GRANT INSERT, DELETE ON radius_db.radcheck     TO 'radius'@'localhost';
 GRANT SELECT ON radius_db.radusergroup         TO 'radius'@'localhost';
