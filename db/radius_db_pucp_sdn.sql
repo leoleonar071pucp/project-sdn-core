@@ -250,6 +250,13 @@ INSERT INTO `usuarios` (codigo_pucp, password_hash, estado_cuenta) VALUES
 ('multi_info_admin',     SHA2('pass_multi2', 256), 'ACTIVO'),
 ('multi_docente_admin',  SHA2('pass_multi3', 256), 'ACTIVO');
 
+-- Se hace este cambio para el rol Visitante 
+-- 
+SET sql_mode='NO_AUTO_VALUE_ON_ZERO';
+
+INSERT INTO `usuarios` (id_usuario, codigo_pucp, password_hash, estado_cuenta) VALUES
+(0, 'VISITANTE_SISTEMA', 'N/A_VISITANTE', 'ACTIVO');
+
 CREATE TABLE IF NOT EXISTS `historial_sesiones` (
     `id_historial`      INT          NOT NULL AUTO_INCREMENT,
     `id_sesion_orig`  INT          NOT NULL COMMENT 'id_sesion original de sesiones_activas',
@@ -490,7 +497,13 @@ CREATE TABLE IF NOT EXISTS `radgroupreply` (
   DEFAULT CHARACTER SET=utf8mb4
   COLLATE=utf8mb4_unicode_ci;
 
+-- Se añadió el rol Visitante y su session timeout (30 minutos)
+-- Atributo que FreeRADIUS devuelve en el Access-Accept para indicarle
+-- a M1 que el rol del cliente es "Visitante". Sin esta fila, el
+-- visitante se autentica contra radcheck pero RADIUS nunca informa
+-- el rol, y M1 no puede completar el registro de sesion.
 INSERT INTO `radgroupreply` (groupname, attribute, op, value) VALUES
+('Visitante',              'Filter-Id',       '=', 'Visitante'),
 ('Estudiante_Telecom',     'Filter-Id',       '=', 'Estudiante_Telecom'),
 ('Estudiante_Telecom',     'Session-Timeout', '=', '28800'),
 ('Estudiante_Informatica', 'Filter-Id',       '=', 'Estudiante_Informatica'),
@@ -577,8 +590,7 @@ CREATE TABLE IF NOT EXISTS `ip_mac_binding` (
 -- PERMISOS MYSQL PARA FREERADIUS Y M1
 -- Ejecutar como root despues de importar este script:
 -- ============================================================
-CREATE USER IF NOT EXISTS 'radius'@'localhost' IDENTIFIED BY 'radius_pass';
-
+CREATE USER IF NOT EXISTS 'radius'@'localhost' IDENTIFIED WITH mysql_native_password BY 'radius_pass';
 GRANT SELECT ON radius_db.radcheck          TO 'radius'@'localhost';
 GRANT SELECT ON radius_db.radreply          TO 'radius'@'localhost';
 GRANT SELECT ON radius_db.radusergroup      TO 'radius'@'localhost';
@@ -595,6 +607,14 @@ GRANT SELECT ON radius_db.recursos          TO 'radius'@'localhost';
 GRANT SELECT ON radius_db.roles_facultad    TO 'radius'@'localhost';
 GRANT SELECT ON radius_db.servidores        TO 'radius'@'localhost';
 
+--'radius' solo tenia SELECT en estas dos tablas, pero el flujo
+--de visitante necesita escribir credenciales temporales (insertar al
+--autenticar, borrar al cerrar sesion). Sin esto, las operaciones de
+--escritura sobre radcheck/radusergroup fallaban por falta de permisos
+GRANT SELECT ON radius_db.radcheck             TO 'radius'@'localhost';
+GRANT INSERT, DELETE ON radius_db.radcheck     TO 'radius'@'localhost';
+GRANT SELECT ON radius_db.radusergroup         TO 'radius'@'localhost';
+GRANT INSERT, DELETE ON radius_db.radusergroup TO 'radius'@'localhost';
 FLUSH PRIVILEGES;
 
 SET SQL_MODE=@OLD_SQL_MODE;
