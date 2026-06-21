@@ -502,16 +502,17 @@ CREATE TABLE IF NOT EXISTS `radgroupreply` (
 -- a M1 que el rol del cliente es "Visitante". Sin esta fila, el
 -- visitante se autentica contra radcheck pero RADIUS nunca informa
 -- el rol, y M1 no puede completar el registro de sesion.
+-- Para estudiante y docente maximo es 2H (7200)
 INSERT INTO `radgroupreply` (groupname, attribute, op, value) VALUES
 ('Visitante',              'Filter-Id',       '=', 'Visitante'),
 ('Estudiante_Telecom',     'Filter-Id',       '=', 'Estudiante_Telecom'),
-('Estudiante_Telecom',     'Session-Timeout', '=', '28800'),
+('Estudiante_Telecom',     'Session-Timeout', '=', '7200'),
 ('Estudiante_Informatica', 'Filter-Id',       '=', 'Estudiante_Informatica'),
-('Estudiante_Informatica', 'Session-Timeout', '=', '28800'),
+('Estudiante_Informatica', 'Session-Timeout', '=', '7200'),
 ('Estudiante_Electronica', 'Filter-Id',       '=', 'Estudiante_Electronica'),
-('Estudiante_Electronica', 'Session-Timeout', '=', '28800'),
+('Estudiante_Electronica', 'Session-Timeout', '=', '7200'),
 ('Docente',                'Filter-Id',       '=', 'Docente'),
-('Docente',                'Session-Timeout', '=', '36000'),
+('Docente',                'Session-Timeout', '=', '7200'),
 ('Admin_TI',               'Filter-Id',       '=', 'Admin_TI'),
 ('Admin_TI',               'Session-Timeout', '=', '43200');
 
