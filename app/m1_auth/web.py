@@ -2,7 +2,7 @@
 """
 web.py — Portal Cautivo Web (API JSON) — SDN PUCP
 Módulo M1 | Grupo 2 - TEL354
-
+- Sheila J 
 Ejecutar en VM-Auth: python3 -u web.py
 
 ¡¡¡ MODO DE PRUEBA ACTUAL: Config.M6_HABILITADO = False en m1_auth.py !!!!

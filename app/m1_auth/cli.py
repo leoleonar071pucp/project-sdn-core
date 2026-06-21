@@ -2,6 +2,7 @@
 """
 cli.py — Cliente CLI del Portal Cautivo — SDN PUCP
 Módulo M1 | Grupo 2 - TEL354
+- Sheila J 
 
 Corre en la máquina del usuario (host sin GUI en la VLAN de
 cuarentena). No contiene lógica de RADIUS/MySQL/M6: solo pide

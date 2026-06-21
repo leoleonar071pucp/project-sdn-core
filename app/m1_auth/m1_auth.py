@@ -2,7 +2,7 @@
 """
 m1_auth.py — Núcleo de autenticación M1 — SDN PUCP
 Grupo 2 | TEL354
-
+- Sheila J 
 Contiene toda la lógica de negocio (RADIUS, MySQL, M6) sin ninguna
 dependencia de interfaz (sin input()/print()). Las interfaces
 (cli.py, web.py) llaman a las funciones autenticar(), autenticar_visitante()
