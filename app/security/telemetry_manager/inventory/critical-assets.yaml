@@ -1,0 +1,21 @@
+assets:
+  - id: portal
+    bridge: REQUIRED
+    source_port: REQUIRED
+    output_tunnel_port: REQUIRED
+  - id: radius
+    bridge: REQUIRED
+    source_port: REQUIRED
+    output_tunnel_port: REQUIRED
+  - id: grades
+    bridge: REQUIRED
+    source_port: REQUIRED
+    output_tunnel_port: REQUIRED
+  - id: admin
+    bridge: REQUIRED
+    source_port: REQUIRED
+    output_tunnel_port: REQUIRED
+  - id: database
+    bridge: REQUIRED
+    source_port: REQUIRED
+    output_tunnel_port: REQUIRED

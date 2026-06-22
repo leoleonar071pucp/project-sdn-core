@@ -1,0 +1,63 @@
+services:
+  m4:
+    profiles: ["deployment"]
+    build: ./m4
+    env_file: [./m4/.env]
+    ports: ["8084:8084"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8084/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  telemetry-manager:
+    profiles: ["deployment"]
+    build: ./telemetry_manager
+    env_file: [./telemetry_manager/.env]
+    ports: ["8090:8090"]
+    volumes:
+      - ./telemetry_manager/inventory:/service/inventory:ro
+
+  event-forwarder:
+    profiles: ["deployment"]
+    build: ./event_forwarder
+    env_file: [./event_forwarder/.env]
+    volumes:
+      - suricata-logs:/var/log/suricata:ro
+      - forwarder-state:/state
+      - ./suricata/critical-assets.yaml:/etc/suricata/critical-assets.yaml:ro
+    depends_on: [m4]
+
+  flow-collector-sflow:
+    profiles: ["deployment"]
+    build: ./flow_collector
+    command: ["python", "-m", "app.main", "sflow", "--port", "6343"]
+    env_file: [./flow_collector/.env]
+    ports: ["6343:6343/udp"]
+    volumes:
+      - collector-state:/service/state
+
+  flow-collector-netflow:
+    profiles: ["deployment"]
+    build: ./flow_collector
+    command: ["python", "-m", "app.main", "netflow", "--port", "2055"]
+    env_file: [./flow_collector/.env]
+    ports: ["2055:2055/udp"]
+    volumes:
+      - collector-state:/service/state
+
+  suricata:
+    profiles: ["deployment"]
+    image: jasonish/suricata:7.0
+    network_mode: host
+    cap_add: [NET_ADMIN, NET_RAW, SYS_NICE]
+    volumes:
+      - ./suricata/suricata.yaml:/etc/suricata/suricata.yaml:ro
+      - ./suricata/rules:/etc/suricata/rules:ro
+      - ./suricata/critical-assets.yaml:/etc/suricata/critical-assets.yaml:ro
+      - suricata-logs:/var/log/suricata
+
+volumes:
+  suricata-logs:
+  forwarder-state:
+  collector-state:
