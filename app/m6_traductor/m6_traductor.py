@@ -95,9 +95,9 @@ class Config:
     # PORTAL_IP es la IP de VM-Auth en la red de datos (192.168.100.x),
     # donde corre web.py (portal cautivo). Ajustar si el slice cambia:
     #   export PORTAL_IP=192.168.100.X SERVER_CURSOS=192.168.100.Y SERVER_NOTAS=192.168.100.Z
-    PORTAL_IP     = os.environ.get("PORTAL_IP",     "192.168.100.2")
-    SERVER_CURSOS = os.environ.get("SERVER_CURSOS", "192.168.100.200")  # H3
-    SERVER_NOTAS  = os.environ.get("SERVER_NOTAS",  "192.168.100.201")  # H4
+    PORTAL_IP     = os.environ.get("PORTAL_IP",     "192.168.100.110")
+    SERVER_CURSOS = os.environ.get("SERVER_CURSOS", "192.168.100.101")
+    SERVER_NOTAS  = os.environ.get("SERVER_NOTAS",  "192.168.100.102")
 
     # DPIDs reales confirmados (curl a /onos/v1/devices, slice actual).
     # Solo se usan para nombrar en logs — la clasificación acceso/tránsito
