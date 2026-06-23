@@ -1,0 +1,35 @@
+%YAML 1.1
+---
+vars:
+  address-groups:
+    HOME_NET: "[10.0.0.0/8,192.168.0.0/16]"
+    EXTERNAL_NET: "!$HOME_NET"
+  port-groups:
+    HTTP_PORTS: "80"
+
+default-rule-path: /etc/suricata/rules
+rule-files:
+  - local.rules
+
+af-packet:
+  - interface: ${SURICATA_INTERFACE:-eth0}
+    cluster-id: 99
+    cluster-type: cluster_flow
+    defrag: yes
+
+outputs:
+  - fast:
+      enabled: no
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve.json
+      types:
+        - alert
+        - anomaly
+        - http
+        - tls
+        - flow
+
+logging:
+  default-log-level: notice

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 m6_traductor.py — Módulo Traductor SDN PUCP | Grupo 2 TEL354
 Mark V (base) + ajustes de integración M1 (Sheila J)
@@ -40,7 +40,9 @@ import os
 import time
 import threading
 import requests
-from collections import deque
+from collections import defaultdict, deque
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 from flask import Flask, request, jsonify
 
 try:
@@ -52,11 +54,21 @@ except ImportError:
 
 #  Configuración base
 class Config:
+    @staticmethod
+    def env_bool(name, default=False):
+        value = os.getenv(name)
+        if value is None:
+            return default
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+
     # ONOS corre en VM-Controller; M6 corre en VM-Auth y lo llama por la red OOB (192.168.201.0/24) — verificado con curl que responde ahí.
     # Configurable via env si se necesita cambiar de red (ej. a la decontrol SDN 192.168.200.0/24) sin tocar código:
     # export ONOS_URL=http://192.168.200.200:8181
     ONOS_URL  = os.environ.get("ONOS_URL", "http://192.168.201.200:8181")
-    ONOS_AUTH = ("onos", "rocks")
+    ONOS_AUTH = (
+        os.getenv("ONOS_USERNAME", "onos"),
+        os.getenv("ONOS_PASSWORD", "rocks"),
+    )
 
     # OPA (M2) — corre en la misma VM-Auth que M6, puerto 8182
     OPA_URL = os.environ.get("OPA_URL", "http://127.0.0.1:8182/v1/data/policy/result")
@@ -76,6 +88,10 @@ class Config:
     # M5 auditoría
     M5_URL = os.environ.get("M5_URL", "http://127.0.0.1:5002/m5/log")
 
+    # M4 seguridad
+    M4_URL = os.getenv("M4_URL", "http://127.0.0.1:8084")
+    SECURITY_TOKEN = os.getenv("SECURITY_TOKEN", "change-me")
+
     # M6 propio
     M6_HOST = "0.0.0.0"
     M6_PORT = int(os.environ.get("M6_PORT", "8080"))
@@ -83,8 +99,26 @@ class Config:
     # MySQL (fallback cuando OPA no disponible)
     MYSQL_HOST = os.environ.get("MYSQL_HOST", "localhost")
     MYSQL_USER = os.environ.get("MYSQL_USER", "radius")
-    MYSQL_PASS = os.environ.get("MYSQL_PASS", "radius_pass")
-    MYSQL_DB   = os.environ.get("MYSQL_DB",   "radius_db")
+    MYSQL_PASS = os.getenv("MYSQL_PASSWORD", os.getenv("MYSQL_PASS", "radius_pass"))
+    MYSQL_DB   = os.getenv("MYSQL_DATABASE", os.getenv("MYSQL_DB", "radius_db"))
+
+    # Interruptores de seguridad. Todos permanecen apagados por defecto.
+    NETWORK_ACTIONS_ENABLED = env_bool.__func__("NETWORK_ACTIONS_ENABLED", False)
+    ONOS_WRITES_ENABLED = env_bool.__func__("ONOS_WRITES_ENABLED", False)
+    ONOS_READS_ENABLED = env_bool.__func__("ONOS_READS_ENABLED", False)
+    OVSDB_ACTIONS_ENABLED = env_bool.__func__("OVSDB_ACTIONS_ENABLED", False)
+    M4_AUTOMATIC_ACTIONS_ENABLED = env_bool.__func__(
+        "M4_AUTOMATIC_ACTIONS_ENABLED", False
+    )
+    M4_EVENTS_ENABLED = env_bool.__func__("M4_EVENTS_ENABLED", False)
+    M5_LOGGING_ENABLED = env_bool.__func__("M5_LOGGING_ENABLED", False)
+    MYSQL_SECURITY_READS_ENABLED = env_bool.__func__(
+        "MYSQL_SECURITY_READS_ENABLED", False
+    )
+    POLICY_QUERIES_ENABLED = env_bool.__func__("POLICY_QUERIES_ENABLED", False)
+    STARTUP_FLOW_INSTALL_ENABLED = env_bool.__func__(
+        "STARTUP_FLOW_INSTALL_ENABLED", False
+    )
 
     # Resiliencia
     MAX_REINTENTOS = 3
@@ -376,20 +410,32 @@ class FlowBuilder:
 
     # ── T0: Bloqueo atacante (tabla 0) ───────────────────────────────────────
 
-    def t0_bloqueo_ataque(self, device_id, ip_atacante, ttl=600, prio=None):
-        """T0 prio5000+ — IP_SRC/32 atacante → DROP con timeout."""
+    def t0_bloqueo_ataque(
+        self,
+        device_id,
+        ip_atacante=None,
+        mac_atacante=None,
+        in_port=None,
+        ttl=600,
+        prio=None,
+    ):
+        """T0 de ataque: combina IP, MAC y puerto cuando están disponibles."""
         if prio is None:
             prio = Config.PRIO_T0_ATAQUE
+        criteria = [{"type": "ETH_TYPE", "ethType": "0x0800"}]
+        if in_port is not None:
+            criteria.append({"type": "IN_PORT", "port": int(in_port)})
+        if mac_atacante:
+            criteria.append({"type": "ETH_SRC", "mac": mac_atacante})
+        if ip_atacante:
+            criteria.append({"type": "IPV4_SRC", "ip": f"{ip_atacante}/32"})
         return {
             "priority":    prio,
             "isPermanent": False,
             "timeout":     ttl,
             "deviceId":    device_id,
             "tableId":     0,
-            "selector": {"criteria": [
-                {"type": "ETH_TYPE", "ethType": "0x0800"},
-                {"type": "IPV4_SRC", "ip": f"{ip_atacante}/32"}
-            ]},
+            "selector": {"criteria": criteria},
             "treatment": {"clearDeferred": True, "instructions": []}
         }
 
@@ -447,6 +493,9 @@ class M5Logger:
 
     def log(self, evento):
         """Envía a M5 en thread daemon para no bloquear la respuesta a M1."""
+        if not Config.M5_LOGGING_ENABLED:
+            self.cola.append({**evento, "status": "SIMULATED"})
+            return
         threading.Thread(
             target=self._enviar, args=(evento,), daemon=True
         ).start()
@@ -477,6 +526,12 @@ class PolicyEngine:
         codigo_pucp = input_data.get("codigo_pucp", "")
         nombre_rol  = input_data.get("rol", "")
         vlan_id     = int(input_data.get("vlan_id", 0))
+
+        if not Config.POLICY_QUERIES_ENABLED:
+            print(
+                f"  [PolicyEngine] SIMULATED: políticas hardcoded para VLAN {vlan_id}"
+            )
+            return self._hardcoded(vlan_id)
 
         # 1. OPA (M2)
         opa_payload = {
@@ -625,6 +680,16 @@ class ONOSClient:
         El flow se envía DIRECTAMENTE como body (sin wrapper {"flows": [...]}).
         Retorna el flowId asignado por ONOS, o None si falló.
         """
+        if not (
+            Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_WRITES_ENABLED
+        ):
+            flow_id = f"simulated-{uuid4()}"
+            print(
+                f"    [ONOS] SIMULATED T{flow_entry.get('tableId', '?')} "
+                f"device={device_id} id={flow_id}"
+            )
+            return flow_id
+
         endpoint = f"{self.url}/onos/v1/flows/{device_id}"
         try:
             resp = requests.post(
@@ -665,6 +730,11 @@ class ONOSClient:
             return None
 
     def _delete_flow(self, device_id, flow_id):
+        if not (
+            Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_WRITES_ENABLED
+        ):
+            print(f"  [ONOS] SIMULATED delete {flow_id} from {device_id}")
+            return True
         endpoint = f"{self.url}/onos/v1/flows/{device_id}/{flow_id}"
         try:
             resp = requests.delete(endpoint, auth=self.auth, timeout=5)
@@ -684,6 +754,8 @@ class ONOSClient:
         Busca host en ONOS por IP → {mac, switch_dpid, in_port}.
         ONOS aprende los hosts dinámicamente vía DHCP/ARP.
         """
+        if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
+            return None
         try:
             resp = requests.get(
                 f"{self.url}/onos/v1/hosts", auth=self.auth, timeout=2
@@ -706,6 +778,8 @@ class ONOSClient:
 
     def get_devices(self):
         """Lista de deviceIds disponibles en ONOS."""
+        if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
+            return [Config.SW1, Config.SW2, Config.SW3]
         try:
             resp = requests.get(
                 f"{self.url}/onos/v1/devices", auth=self.auth, timeout=5
@@ -724,6 +798,8 @@ class ONOSClient:
         /onos/v1/links. No depende de qué DPID sea cuál — funciona igual
         para cualquier topología que ONOS vea vía LLDP.
         """
+        if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
+            return [2, 3] if device_id == Config.SW2 else []
         all_ports = set()
         try:
             resp = requests.get(
@@ -778,15 +854,232 @@ class M6Translator:
         self.policies = PolicyEngine()
         self._lock = threading.Lock()
         self.flows_por_sesion = {}  # {mac: [(device_id, flow_id), ...]}
+        self.mitigaciones = {}
+        self._security_windows = defaultdict(deque)
 
     def _instalar_y_cachear(self, device_id, flow_entry, mac=None):
         """Instala un flow y lo registra en el cache de sesión si se provee mac."""
         fid = self.onos.instalar_flow(device_id, flow_entry)
         if fid and mac is not None:
+            mac = mac.lower()
             with self._lock:
                 self.flows_por_sesion.setdefault(mac, [])
                 self.flows_por_sesion[mac].append((device_id, fid))
         return fid
+
+    def _buscar_sesion(self, src_ip, src_mac, switch_dpid, in_port, data):
+        """Resuelve la sesión sin conectar a MySQL salvo habilitación explícita."""
+        if Config.MYSQL_SECURITY_READS_ENABLED and MYSQL_OK:
+            try:
+                conn = mysql.connector.connect(
+                    host=Config.MYSQL_HOST,
+                    user=Config.MYSQL_USER,
+                    password=Config.MYSQL_PASS,
+                    database=Config.MYSQL_DB,
+                    connection_timeout=3,
+                )
+                cur = conn.cursor(dictionary=True)
+                cur.execute(
+                    """
+                    SELECT s.*, u.codigo_pucp
+                    FROM sesiones_activas s
+                    JOIN usuarios u ON u.id_usuario=s.id_usuario
+                    WHERE s.ip_asignada=%s
+                      AND LOWER(s.mac_address)=LOWER(%s)
+                      AND s.switch_dpid=%s
+                      AND s.in_port=%s
+                      AND s.estado='ACTIVA'
+                    LIMIT 1
+                    """,
+                    (src_ip, src_mac, switch_dpid, in_port),
+                )
+                session = cur.fetchone()
+                cur.close()
+                conn.close()
+                return session
+            except Exception as exc:
+                print(f"[M6] No se pudo consultar sesión: {exc}")
+                return None
+
+        if not data.get("simulated_session"):
+            return None
+        return {
+            "codigo_pucp": data.get("codigo_pucp", "SIMULATED"),
+            "nombre_rol": data.get("nombre_rol", "Estudiante_Telecom"),
+            "ip_asignada": src_ip,
+            "mac_address": src_mac,
+            "switch_dpid": switch_dpid,
+            "in_port": int(in_port),
+        }
+
+    def _evaluar_acceso_reactivo(self, session, data):
+        vlan_id = int(
+            data.get("vlan_id")
+            or Config.VLANS_POR_ROL.get(session.get("nombre_rol"), 0)
+        )
+        payload = {
+            "input": {
+                "codigo_pucp": session.get("codigo_pucp", ""),
+                "rol": session.get("nombre_rol", ""),
+                "vlan_id": vlan_id,
+                "ip_asignada": session.get("ip_asignada"),
+                "mac_address": session.get("mac_address"),
+                "switch_dpid": session.get("switch_dpid"),
+            }
+        }
+        policies = (
+            self.policies.get_policies(payload)
+            if Config.POLICY_QUERIES_ENABLED
+            else self.policies._hardcoded(vlan_id)
+        )
+        dst_ip = Config.get_ip_mapping_m2().get(
+            data.get("dst_ip"), data.get("dst_ip")
+        )
+        dst_port = int(data.get("dst_port", 0))
+        for permission in policies.get("permisos", []):
+            if permission["ip_dst"] == dst_ip and (
+                not permission.get("puertos")
+                or dst_port in permission["puertos"]
+            ):
+                return True, policies
+        return False, policies
+
+    def _registrar_evento_denegado(self, data, event_type="policy_denial"):
+        now = time.time()
+        key = (
+            data.get("src_mac"),
+            data.get("src_ip"),
+            data.get("switch_dpid"),
+            data.get("in_port"),
+        )
+        bucket = self._security_windows[key]
+        bucket.append(
+            (
+                now,
+                data.get("dst_ip"),
+                data.get("dst_port"),
+            )
+        )
+        while bucket and now - bucket[0][0] > 10:
+            bucket.popleft()
+        destinations = {item[1] for item in bucket if item[1]}
+        ports = {item[2] for item in bucket if item[2] is not None}
+        if len(bucket) >= 50 or len(ports) >= 20 or len(destinations) >= 10:
+            event_type = "policy_denial_burst"
+
+        event = {
+            "idempotency_key": str(uuid4()),
+            "event_type": event_type,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "src_ip": data.get("src_ip"),
+            "src_mac": data.get("src_mac"),
+            "dst_ip": data.get("dst_ip"),
+            "dst_port": data.get("dst_port"),
+            "protocol": data.get("protocol"),
+            "switch_dpid": data.get("switch_dpid"),
+            "in_port": data.get("in_port"),
+            "username": data.get("codigo_pucp"),
+            "role": data.get("nombre_rol"),
+            "severity": 80 if event_type == "invalid_ip_mac_binding" else 0,
+            "metadata": {
+                "denials": len(bucket),
+                "unique_destinations": len(destinations),
+                "unique_ports": len(ports),
+                "window_seconds": 10,
+            },
+        }
+        if Config.M4_EVENTS_ENABLED and Config.NETWORK_ACTIONS_ENABLED:
+            threading.Thread(
+                target=self._enviar_evento_m4,
+                args=(event,),
+                daemon=True,
+            ).start()
+        return event
+
+    def _enviar_evento_m4(self, event):
+        try:
+            requests.post(
+                f"{Config.M4_URL}/m4/events/m6",
+                json=event,
+                headers={"X-Security-Token": Config.SECURITY_TOKEN},
+                timeout=3,
+            ).raise_for_status()
+        except Exception as exc:
+            print(f"[M6] No se pudo enviar evento a M4: {exc}")
+
+    def procesar_packet_in(self, data):
+        required = (
+            "src_ip",
+            "src_mac",
+            "dst_ip",
+            "dst_port",
+            "switch_dpid",
+            "in_port",
+        )
+        missing = [field for field in required if data.get(field) is None]
+        if missing:
+            return {"ok": False, "error": f"faltan campos: {', '.join(missing)}"}
+
+        session = self._buscar_sesion(
+            data["src_ip"],
+            data["src_mac"],
+            data["switch_dpid"],
+            int(data["in_port"]),
+            data,
+        )
+        if not session:
+            event = self._registrar_evento_denegado(
+                data,
+                event_type="invalid_ip_mac_binding",
+            )
+            return {
+                "ok": True,
+                "decision": "DENY",
+                "install_flow": False,
+                "reason": "invalid_ip_mac_binding",
+                "security_event": event,
+            }
+
+        merged = {
+            **data,
+            "codigo_pucp": session.get("codigo_pucp"),
+            "nombre_rol": session.get("nombre_rol"),
+        }
+        allowed, _ = self._evaluar_acceso_reactivo(session, merged)
+        if not allowed:
+            event = self._registrar_evento_denegado(merged)
+            return {
+                "ok": True,
+                "decision": "DENY",
+                "install_flow": False,
+                "reason": "denied_by_policy",
+                "security_event": event,
+            }
+
+        flow = self.builder.t0_allow_usuario(
+            data["switch_dpid"],
+            data["src_mac"],
+            data["dst_ip"],
+            out_port=data.get("out_port", "NORMAL"),
+            session_timeout=int(data.get("idle_timeout", 300)),
+        )
+        flow_id = self._instalar_y_cachear(
+            data["switch_dpid"],
+            flow,
+            data["src_mac"],
+        )
+        return {
+            "ok": True,
+            "decision": "ALLOW",
+            "install_flow": True,
+            "flow_id": flow_id,
+            "flow": flow,
+            "status": (
+                "EXECUTED"
+                if Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_WRITES_ENABLED
+                else "SIMULATED"
+            ),
+        }
 
     # ── Arranque ──────────────────────────────────────────────────────────────
 
@@ -1030,6 +1323,7 @@ class M6Translator:
         Elimina todos los flows de la sesión (T1, T3, T0 ALLOW/DENY por MAC).
         Llamado por M1 al hacer logout.
         """
+        mac = mac.lower()
         with self._lock:
             flows = self.flows_por_sesion.pop(mac, [])
         print(f"\n[M6] Cerrando sesión MAC={mac} — {len(flows)} flows")
@@ -1046,33 +1340,154 @@ class M6Translator:
 
     def procesar_mitigacion(self, directiva):
         """
-        Instala T0 DROP de alta prioridad para el IP del atacante.
-        directiva = {ip_atacante, tipo, switch_dpid, prioridad, ttl_segundos}
+        Construye o instala un DROP T0, según los interruptores de seguridad.
         """
-        ip_atacante = directiva["ip_atacante"]
+        incident_id = directiva.get("incident_id") or str(uuid4())
+        ip_atacante = directiva.get("ip_atacante")
+        mac_atacante = directiva.get("mac_atacante")
         switch_dpid = directiva.get("switch_dpid")
+        in_port     = directiva.get("in_port")
         ttl         = directiva.get("ttl_segundos", 600)
         prio        = directiva.get("prioridad", Config.PRIO_T0_ATAQUE)
 
-        print(f"\n[M6] DirectivaMitigacion: ip={ip_atacante} ttl={ttl}s prio={prio}")
+        if not ip_atacante and not mac_atacante:
+            return {"ok": False, "error": "se requiere ip_atacante o mac_atacante"}
+        if not switch_dpid and not Config.ONOS_READS_ENABLED:
+            return {
+                "ok": False,
+                "error": "switch_dpid es obligatorio con ONOS_READS_ENABLED=false",
+            }
+
+        print(
+            f"\n[M6] DirectivaMitigacion: incident={incident_id} "
+            f"ip={ip_atacante} mac={mac_atacante} ttl={ttl}s prio={prio}"
+        )
         devices = [switch_dpid] if switch_dpid else self.onos.get_devices()
+        flows = []
         for device_id in devices:
-            self.onos.instalar_flow(
+            flow = self.builder.t0_bloqueo_ataque(
                 device_id,
-                self.builder.t0_bloqueo_ataque(device_id, ip_atacante, ttl, prio)
+                ip_atacante=ip_atacante,
+                mac_atacante=mac_atacante,
+                in_port=in_port,
+                ttl=ttl,
+                prio=prio,
             )
+            flow_id = self.onos.instalar_flow(device_id, flow)
+            if flow_id:
+                flows.append(
+                    {"device_id": device_id, "flow_id": flow_id, "flow": flow}
+                )
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(ttl))
+        status = (
+            "EXECUTED"
+            if Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_WRITES_ENABLED
+            else "SIMULATED"
+        )
+        result = {
+            "ok": bool(flows),
+            "incident_id": incident_id,
+            "action_id": str(uuid4()),
+            "status": status,
+            "flow_ids": [item["flow_id"] for item in flows],
+            "devices": [item["device_id"] for item in flows],
+            "flows": [item["flow"] for item in flows],
+            "expires_at": expires_at.isoformat(),
+        }
+        with self._lock:
+            self.mitigaciones[incident_id] = {**result, "active": True}
         self.logger.log({
             "modulo":      "M6",
             "evento":      "mitigacion_aplicada",
+            "incident_id": incident_id,
             "ip_atacante": ip_atacante,
+            "mac_atacante": mac_atacante,
             "ttl":         ttl,
-            "prio":        prio
+            "prio":        prio,
+            "status":      status,
         })
+        return result
+
+    def deshacer_mitigacion(self, incident_id):
+        with self._lock:
+            mitigation = self.mitigaciones.get(incident_id)
+        if not mitigation:
+            return {"ok": False, "error": "mitigación no encontrada"}
+
+        success = True
+        for device_id, flow_id in zip(
+            mitigation.get("devices", []),
+            mitigation.get("flow_ids", []),
+        ):
+            success = self.onos.eliminar_flow(device_id, flow_id) and success
+
+        with self._lock:
+            mitigation["active"] = False
+            mitigation["unblocked_at"] = datetime.now(timezone.utc).isoformat()
+            mitigation["unblock_status"] = (
+                "EXECUTED"
+                if Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_WRITES_ENABLED
+                else "SIMULATED"
+            )
+        return {
+            "ok": success,
+            "incident_id": incident_id,
+            "status": mitigation["unblock_status"],
+        }
+
+    def estado_host(self, ip=None, mac=None):
+        with self._lock:
+            matching = [
+                mitigation
+                for mitigation in self.mitigaciones.values()
+                if mitigation.get("active")
+                and (
+                    (ip and any(
+                        criterion.get("type") == "IPV4_SRC"
+                        and criterion.get("ip") == f"{ip}/32"
+                        for flow in mitigation.get("flows", [])
+                        for criterion in flow.get("selector", {}).get("criteria", [])
+                    ))
+                    or (mac and any(
+                        criterion.get("type") == "ETH_SRC"
+                        and criterion.get("mac", "").lower() == mac.lower()
+                        for flow in mitigation.get("flows", [])
+                        for criterion in flow.get("selector", {}).get("criteria", [])
+                    ))
+                )
+            ]
+            session_flows = len(self.flows_por_sesion.get((mac or "").lower(), []))
+        return {
+            "ip": ip,
+            "mac": mac,
+            "blocked": bool(matching),
+            "mitigations": matching,
+            "flows_installed": session_flows,
+            "network_mode": (
+                "ENABLED"
+                if Config.NETWORK_ACTIONS_ENABLED
+                else "SIMULATED"
+            ),
+        }
 
 
 # ─── Flask API ────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 m6  = M6Translator()
+
+
+def _security_token_valido():
+    return request.headers.get("X-Security-Token") == Config.SECURITY_TOKEN
+
+
+@app.route("/m6/packet-in", methods=["POST"])
+def endpoint_packet_in():
+    """Consulta reactiva originada por la futura aplicación Packet-In de ONOS."""
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    data = request.json or {}
+    result = m6.procesar_packet_in(data)
+    return jsonify(result), 200 if result.get("ok") else 400
 
 
 @app.route("/m6/resolver_host", methods=["POST"])
@@ -1126,16 +1541,59 @@ def endpoint_cerrar_sesion():
 @app.route("/m6/mitigacion", methods=["POST"])
 def endpoint_mitigacion():
     """M4 llama aquí al detectar un atacante."""
-    directiva = request.json
-    if not directiva or "ip_atacante" not in directiva:
-        return jsonify({"error": "falta ip_atacante"}), 400
-    m6.procesar_mitigacion(directiva)
-    return jsonify({"ok": True}), 200
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    directiva = request.json or {}
+    result = m6.procesar_mitigacion(directiva)
+    return jsonify(result), 200 if result.get("ok") else 400
+
+
+@app.route("/m6/unblock", methods=["POST"])
+def endpoint_unblock():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    incident_id = (request.json or {}).get("incident_id")
+    if not incident_id:
+        return jsonify({"error": "falta incident_id"}), 400
+    result = m6.deshacer_mitigacion(incident_id)
+    return jsonify(result), 200 if result.get("ok") else 404
+
+
+@app.route("/m6/security/host-state", methods=["GET"])
+def endpoint_host_state():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    ip = request.args.get("ip")
+    mac = request.args.get("mac")
+    if not ip and not mac:
+        return jsonify({"error": "se requiere ip o mac"}), 400
+    return jsonify(m6.estado_host(ip=ip, mac=mac)), 200
+
+
+@app.route("/m6/security/mitigations/<incident_id>", methods=["GET"])
+def endpoint_mitigation_status(incident_id):
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    with m6._lock:
+        result = m6.mitigaciones.get(incident_id)
+    if result is None:
+        return jsonify({"error": "mitigación no encontrada"}), 404
+    return jsonify(result), 200
 
 
 @app.route("/m6/arranque", methods=["POST"])
 def endpoint_arranque():
     """Reinstala reglas de cuarentena y proactivas en todos los switches."""
+    if not (
+        Config.NETWORK_ACTIONS_ENABLED
+        and Config.ONOS_WRITES_ENABLED
+        and Config.STARTUP_FLOW_INSTALL_ENABLED
+    ):
+        return jsonify({
+            "ok": True,
+            "status": "SIMULATED",
+            "message": "instalación de arranque deshabilitada",
+        }), 200
     m6.instalar_cuarentena_arranque()
     return jsonify({"ok": True}), 200
 
@@ -1153,7 +1611,13 @@ def endpoint_status():
         "opa_url":          Config.OPA_URL,
         "mysql_disponible": MYSQL_OK,
         "devices_onos":     devices,
-        "sesiones_activas": sesiones
+        "sesiones_activas": sesiones,
+        "network_actions_enabled": Config.NETWORK_ACTIONS_ENABLED,
+        "onos_writes_enabled": Config.ONOS_WRITES_ENABLED,
+        "onos_reads_enabled": Config.ONOS_READS_ENABLED,
+        "ovsdb_actions_enabled": Config.OVSDB_ACTIONS_ENABLED,
+        "automatic_actions_enabled": Config.M4_AUTOMATIC_ACTIONS_ENABLED,
+        "startup_flow_install_enabled": Config.STARTUP_FLOW_INSTALL_ENABLED,
     }), 200
 
 
@@ -1171,7 +1635,14 @@ if __name__ == "__main__":
     print(f"  Puerto: {Config.M6_PORT}  (threaded)")
     print(SEP)
 
-    m6.instalar_cuarentena_arranque()
+    if (
+        Config.NETWORK_ACTIONS_ENABLED
+        and Config.ONOS_WRITES_ENABLED
+        and Config.STARTUP_FLOW_INSTALL_ENABLED
+    ):
+        m6.instalar_cuarentena_arranque()
+    else:
+        print("[M6] Arranque seguro: no se instalarán flows en ONOS")
 
     print(f"[M6] API escuchando en {Config.M6_HOST}:{Config.M6_PORT}\n")
     app.run(host=Config.M6_HOST, port=Config.M6_PORT,

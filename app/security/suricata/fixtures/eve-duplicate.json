@@ -1,0 +1,2 @@
+{"timestamp":"2026-06-22T10:21:00.000000+00:00","flow_id":201,"event_type":"alert","src_ip":"10.2.1.200","dest_ip":"10.0.0.30","dest_port":80,"proto":"TCP","alert":{"severity":1,"signature_id":9000003,"signature":"SDN DEMO suspicious command in HTTP"}}
+{"timestamp":"2026-06-22T10:21:00.000000+00:00","flow_id":201,"event_type":"alert","src_ip":"10.2.1.200","dest_ip":"10.0.0.30","dest_port":80,"proto":"TCP","alert":{"severity":1,"signature_id":9000003,"signature":"SDN DEMO suspicious command in HTTP"}}
