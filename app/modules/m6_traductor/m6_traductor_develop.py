@@ -791,6 +791,20 @@ class ONOSClient:
             print(f"  [ONOS] Error GET /devices: {e}")
         return []
 
+    def get_links(self):
+        """Lista de links LLDP entre switches — para BFS de next-hop."""
+        if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
+            return []
+        try:
+            resp = requests.get(
+                f"{self.url}/onos/v1/links", auth=self.auth, timeout=5
+            )
+            if resp.status_code == 200:
+                return resp.json().get("links", [])
+        except Exception as e:
+            print(f"  [ONOS] Error GET /links: {e}")
+        return []
+
     def get_access_ports(self, device_id):
         """
         Devuelve los puertos de acceso (hacia hosts) de un switch.
@@ -1082,6 +1096,77 @@ class M6Translator:
             ),
         }
 
+    # ── Rutas de tránsito (BFS sobre links LLDP) ─────────────────────────────
+
+    def _bfs_next_hop(self, links, dst_device):
+        """
+        BFS reverso sobre el grafo de links LLDP.
+        Retorna {switch_id: output_port} donde output_port es el puerto a usar
+        en cada switch para alcanzar dst_device en un salto más.
+        """
+        rev_adj = defaultdict(list)
+        for link in links:
+            src   = link['src']['device']
+            src_p = int(link['src']['port'])
+            dst   = link['dst']['device']
+            rev_adj[dst].append((src, src_p))
+
+        next_hop = {}
+        queue    = deque([dst_device])
+        visited  = {dst_device}
+        while queue:
+            current = queue.popleft()
+            for src, src_port in rev_adj[current]:
+                if src not in visited:
+                    visited.add(src)
+                    next_hop[src] = src_port
+                    queue.append(src)
+        return next_hop
+
+    def _instalar_transito_ip(self, devices, links, ip_dst, dst_host_info,
+                               label, prio=150, mac=None, timeout=0):
+        """
+        Instala flows explícitos IPV4_DST=ip_dst → OUTPUT:port en cada switch,
+        calculando el next-hop via BFS sobre links LLDP.
+        Permanentes si timeout=0 (arranque). Per-sesión si timeout>0.
+        Si mac!=None, registra los flow IDs en el cache de sesión.
+        """
+        if not dst_host_info or not links:
+            print(f"  [T0] Sin info host para tránsito {label} — skip")
+            return {}
+        dst_device = dst_host_info["switch_dpid"]
+        dst_port   = int(dst_host_info["in_port"])
+        next_hop   = self._bfs_next_hop(links, dst_device)
+        next_hop[dst_device] = dst_port  # último salto: dst_switch → access port
+
+        print(f"\n  [T0] Tránsito → {label} ({ip_dst}) prio={prio}:")
+        installed = {}
+        for device_id in devices:
+            port = next_hop.get(device_id)
+            if port is None:
+                continue
+            flow = {
+                "priority":    prio,
+                "isPermanent": (timeout == 0),
+                "timeout":     timeout,
+                "deviceId":    device_id,
+                "tableId":     0,
+                "selector": {"criteria": [
+                    {"type": "ETH_TYPE", "ethType": "0x0800"},
+                    {"type": "IP_PROTO", "protocol": 6},
+                    {"type": "IPV4_DST", "ip": f"{ip_dst}/32"}
+                ]},
+                "treatment": {"instructions": [{"type": "OUTPUT", "port": port}]}
+            }
+            if mac:
+                fid = self._instalar_y_cachear(device_id, flow, mac)
+            else:
+                fid = self.onos.instalar_flow(device_id, flow)
+            nombre = Config.SWITCH_NOMBRES.get(device_id, device_id[-4:])
+            print(f"    ✓ {nombre} → p{port}")
+            installed[device_id] = port
+        return installed
+
     # ── Arranque ──────────────────────────────────────────────────────────────
 
     def instalar_cuarentena_arranque(self):
@@ -1163,6 +1248,59 @@ class M6Translator:
             self.onos.instalar_flow(device_id,
                 self.builder.t0_return_portal_flow(device_id, PORTAL_IP))
             print(f"    ✓ {nombre}")
+
+        # ── T0: Tránsito explícito BFS — corrige NORMAL+FDB vacía en OVS ────────
+        # PORTAL: flows en TODOS los switches.
+        # SRV1/SRV2: flows en tránsito y acceso-servidor; NO en acceso-host
+        #   (prio=35000 ALLOW/DENY por sesión cubre el enforcement allí).
+        # DENY default prio=3 en acceso-host bloquea acceso pre-auth a SRV.
+        print(f"\n  [T0] Rutas tránsito BFS (PORTAL/SRV1/SRV2)...")
+        links = self.onos.get_links()
+        if links:
+            # Clasificar acceso-servidor vs acceso-host
+            known_infra_ips = {PORTAL_IP, SRV_CURSOS, SRV_NOTAS}
+            server_access = set()
+            for dev_id in access_switches:
+                for ip in known_infra_ips:
+                    h = self.onos.get_host_by_ip(ip)
+                    if h and h["switch_dpid"] == dev_id:
+                        server_access.add(dev_id)
+                        break
+            host_access = set(access_switches.keys()) - server_access
+
+            h_portal = self.onos.get_host_by_ip(PORTAL_IP)
+            if h_portal:
+                self._instalar_transito_ip(devices, links, PORTAL_IP,
+                                            h_portal, "portal", prio=150)
+            else:
+                print(f"    ⚠ Portal ({PORTAL_IP}) no en ONOS — flows pendientes")
+
+            srv_devices = [d for d in devices if d not in host_access]
+            for ip_srv, label in [(SRV_CURSOS, "srv1"), (SRV_NOTAS, "srv2")]:
+                h_srv = self.onos.get_host_by_ip(ip_srv)
+                if h_srv:
+                    self._instalar_transito_ip(srv_devices, links, ip_srv,
+                                                h_srv, label, prio=150)
+                else:
+                    print(f"    ⚠ {label} ({ip_srv}) no en ONOS — flows pendientes")
+
+            print(f"\n  [T0] DENY default SRV pre-auth (host-acceso, prio=3):")
+            for device_id in host_access:
+                nombre = Config.SWITCH_NOMBRES.get(device_id, device_id[-4:])
+                for srv_ip in (SRV_CURSOS, SRV_NOTAS):
+                    self.onos.instalar_flow(device_id, {
+                        "priority": 3, "isPermanent": True, "timeout": 0,
+                        "deviceId": device_id, "tableId": 0,
+                        "selector": {"criteria": [
+                            {"type": "ETH_TYPE", "ethType": "0x0800"},
+                            {"type": "IP_PROTO", "protocol": 6},
+                            {"type": "IPV4_DST", "ip": f"{srv_ip}/32"}
+                        ]},
+                        "treatment": {"clearDeferred": True, "instructions": []}
+                    })
+                print(f"    ✓ {nombre}")
+        else:
+            print(f"    ⚠ Sin links LLDP — skip rutas BFS")
 
         # ── T1: Cuarentena VLAN 90 en TODOS + VLAN push en ACCESO ────────────
         print(f"\n  [T1] Cuarentena VLAN 90:")
@@ -1262,6 +1400,30 @@ class M6Translator:
             mac
         )
 
+        # T0: Transit return — rutas en switches intermedios hacia este host.
+        # t0_return_flow cubre el último hop (switch del host). Este bloque
+        # cubre los switches entre servidores y el host (SW5, SW2, etc.).
+        print(f"  [T0] Transit return ({ip_asignada} → todos)...")
+        links_data  = self.onos.get_links()
+        all_dev     = self.onos.get_devices() if links_data else []
+        nh_to_host  = self._bfs_next_hop(links_data, switch_dpid) if links_data else {}
+        for dev_id in all_dev:
+            if dev_id == switch_dpid:
+                continue
+            port = nh_to_host.get(dev_id)
+            if not port:
+                continue
+            self._instalar_y_cachear(dev_id, {
+                "priority": 180, "isPermanent": False, "timeout": 28800,
+                "deviceId": dev_id, "tableId": 0,
+                "selector": {"criteria": [
+                    {"type": "ETH_TYPE", "ethType": "0x0800"},
+                    {"type": "IP_PROTO", "protocol": 6},
+                    {"type": "IPV4_DST", "ip": f"{ip_asignada}/32"}
+                ]},
+                "treatment": {"instructions": [{"type": "OUTPUT", "port": port}]}
+            }, mac)
+
         # 2. Obtener políticas (OPA → MySQL → hardcoded)
         payload_opa = {
             "input": {
@@ -1280,12 +1442,16 @@ class M6Translator:
         print(f"  Instalando enforcement...")
 
         for permiso in politicas.get("permisos", []):
-            ip_dst = permiso["ip_dst"]
+            ip_dst   = permiso["ip_dst"]
+            out_port = "NORMAL"
+            if links_data:
+                srv_info = self.onos.get_host_by_ip(ip_dst)
+                if srv_info:
+                    nh = self._bfs_next_hop(links_data, srv_info["switch_dpid"])
+                    out_port = nh.get(switch_dpid, "NORMAL")
             self._instalar_y_cachear(
                 switch_dpid,
-                self.builder.t0_allow_usuario(
-                    switch_dpid, mac, ip_dst, out_port="NORMAL"
-                ),
+                self.builder.t0_allow_usuario(switch_dpid, mac, ip_dst, out_port=out_port),
                 mac
             )
             n_allow += 1
