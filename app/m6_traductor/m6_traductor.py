@@ -393,20 +393,7 @@ class FlowBuilder:
             "treatment": {"clearDeferred": True, "instructions": []}
         }
 
-    def t0_allow_arp(self, device_id):
-        """T0 prio500 — ARP broadcast/unicast → OUTPUT NORMAL (resolución MAC)."""
-        return {
-            "priority":    500,
-            "isPermanent": True,
-            "deviceId":    device_id,
-            "tableId":     0,
-            "selector": {"criteria": [
-                {"type": "ETH_TYPE", "ethType": "0x0806"}
-            ]},
-            "treatment": {"instructions": [
-                {"type": "OUTPUT", "port": "CONTROLLER"}
-            ]}
-        }
+   
 
     # ── T0: Bloqueo atacante (tabla 0) ───────────────────────────────────────
 
