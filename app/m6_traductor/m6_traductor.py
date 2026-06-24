@@ -1112,11 +1112,7 @@ class M6Translator:
             print(f"    ✓ {nombre}")
 
         # ── T0: ARP pass-through en TODOS ─────────────────────────────────────
-        print(f"\n  [T0] ARP pass-through:")
-        for device_id in devices:
-            nombre = Config.SWITCH_NOMBRES.get(device_id, device_id[-4:])
-            self.onos.instalar_flow(device_id, self.builder.t0_allow_arp(device_id))
-            print(f"    ✓ {nombre}")
+       
 
         # ── T0: Table-miss NORMAL en switches de TRÁNSITO ────────────────────
         print(f"\n  [T0] Table-miss NORMAL (tránsito):")
