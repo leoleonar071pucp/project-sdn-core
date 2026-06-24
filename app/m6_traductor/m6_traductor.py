@@ -404,7 +404,7 @@ class FlowBuilder:
                 {"type": "ETH_TYPE", "ethType": "0x0806"}
             ]},
             "treatment": {"instructions": [
-                {"type": "OUTPUT", "port": "NORMAL"}
+                {"type": "OUTPUT", "port": "CONTROLLER"}
             ]}
         }
 
