@@ -6,8 +6,6 @@ services:
     image: openpolicyagent/opa:0.68.0
     container_name: m2-opa
     network_mode: host 
-    ports:
-      - "8182:8181"
     volumes:
       - ./opa/policy.rego:/workspace/policy.rego:ro
     command: run --server --addr :8182 /workspace/policy.rego
