@@ -6,14 +6,14 @@ from datetime import datetime
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "db"),
-    "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", "rootpass"),
+    "user": os.getenv("DB_USER", "radius"),
+    "password": os.getenv("DB_PASSWORD", "radius_pass"),
     "database": os.getenv("DB_NAME", "radius_db"),
     "charset": "utf8mb4",
     "connect_timeout": 5,
 }
 
-OPA_URL = os.getenv("OPA_URL", "http://opa:8181")
+OPA_URL = os.getenv("OPA_URL", "http://opa:8182")
 
 RESOURCES_INTERVAL = int(os.getenv("RESOURCES_SYNC_INTERVAL", "300"))  # 5 min
 EXCEPTIONS_INTERVAL = int(os.getenv("EXCEPTIONS_SYNC_INTERVAL", "30"))  # 30 seg
