@@ -119,6 +119,7 @@ class Config:
     STARTUP_FLOW_INSTALL_ENABLED = env_bool.__func__(
         "STARTUP_FLOW_INSTALL_ENABLED", False
     )
+    PORTAL_SYNC_INTERVAL = int(os.getenv("PORTAL_SYNC_INTERVAL", "0"))
 
     # Resiliencia
     MAX_REINTENTOS = 3
@@ -376,6 +377,40 @@ class FlowBuilder:
             ]}
         }
 
+    def t0_allow_tcp_path(self, device_id, in_port, src_mac, dst_mac,
+                          src_ip, dst_ip, tcp_port, out_port,
+                          direction="dst", session_timeout=28800):
+        """
+        Tabla 0 prio35000 — flow estricto para un salto del camino.
+        direction='dst' usa TCP_DST (ida cliente→servidor);
+        direction='src' usa TCP_SRC (retorno servidor→cliente).
+        """
+        tcp_match = (
+            {"type": "TCP_SRC", "tcpPort": int(tcp_port)}
+            if direction == "src"
+            else {"type": "TCP_DST", "tcpPort": int(tcp_port)}
+        )
+        return {
+            "priority":    Config.PRIO_T0_USUARIO,
+            "isPermanent": False,
+            "timeout":     session_timeout,
+            "deviceId":    device_id,
+            "tableId":     0,
+            "selector": {"criteria": [
+                {"type": "IN_PORT",  "port": int(in_port)},
+                {"type": "ETH_SRC",  "mac":  src_mac},
+                {"type": "ETH_DST",  "mac":  dst_mac},
+                {"type": "ETH_TYPE", "ethType": "0x0800"},
+                {"type": "IP_PROTO", "protocol": 6},
+                {"type": "IPV4_SRC", "ip": f"{src_ip}/32"},
+                {"type": "IPV4_DST", "ip": f"{dst_ip}/32"},
+                tcp_match
+            ]},
+            "treatment": {"instructions": [
+                {"type": "OUTPUT", "port": int(out_port)}
+            ]}
+        }
+
     def t0_deny_usuario(self, device_id, mac, ip_dst, session_timeout=28800):
         """Tabla 0 prio35000 — ETH_SRC=MAC + IP_DST → DROP (DENY efectivo)."""
         return {
@@ -584,13 +619,15 @@ class PolicyEngine:
             )
             cur = conn.cursor(dictionary=True)
             cur.execute("""
-                SELECT p.accion, rec.ip_dst, rec.puerto
+                SELECT srv.ip_servidor AS ip_dst, rec.puerto
                 FROM politicas_rbac p
-                JOIN recursos rec      ON p.id_recurso = rec.id_recurso
-                JOIN roles_facultad rf ON p.id_rol     = rf.id_rol
+                JOIN recursos rec      ON p.id_recurso  = rec.id_recurso
+                JOIN servidores srv    ON rec.id_servidor = srv.id_servidor
+                JOIN roles_facultad rf ON p.id_rol      = rf.id_rol
                 WHERE rf.nombre_rol = %s
-                  AND p.accion IN ('ALLOW', 'DENY')
-                ORDER BY p.accion, rec.ip_dst, rec.puerto
+                  AND p.activo = 1
+                  AND rec.protocolo = 'TCP'
+                ORDER BY srv.ip_servidor, rec.puerto
             """, (nombre_rol,))
             rows = cur.fetchall()
             conn.close()
@@ -598,27 +635,19 @@ class PolicyEngine:
             if not rows:
                 return None
 
-            allow_map, deny_map = {}, {}
+            allow_map = {}
             for row in rows:
                 ip_raw = row["ip_dst"]
                 ip     = self._normalizar_ip(ip_raw)
                 puerto = int(row["puerto"])
-                accion = row["accion"]
-                (allow_map if accion == "ALLOW" else deny_map).setdefault(
-                    ip, []
-                ).append(puerto)
-
-            for ip in list(deny_map.keys()):
-                if ip in allow_map:
-                    del deny_map[ip]
+                allow_map.setdefault(ip, []).append(puerto)
 
             print(f"  [PolicyEngine] MySQL — {nombre_rol}: "
-                  f"{len(allow_map)} destinos ALLOW, {len(deny_map)} DENY")
+                  f"{len(allow_map)} destinos ALLOW")
             return {
                 "permisos":    [{"ip_dst": ip, "puertos": sorted(set(ps))}
                                 for ip, ps in allow_map.items()],
-                "denegaciones":[{"ip_dst": ip, "puertos": sorted(set(ps))}
-                                for ip, ps in deny_map.items()]
+                "denegaciones":[]
             }
         except Exception as e:
             print(f"  [PolicyEngine] MySQL error: {e}")
@@ -627,16 +656,29 @@ class PolicyEngine:
     def _hardcoded(self, vlan_id):
         """Políticas por defecto — espejo de la arquitectura de acceso PUCP."""
         cursos, notas = Config.SERVER_CURSOS, Config.SERVER_NOTAS
-        if vlan_id in (210, 220, 230):    # Estudiantes — solo cursos
+        if vlan_id == 210:                # Telecom
             return {
-                "permisos":    [{"ip_dst": cursos, "puertos": [80, 443]}],
-                "denegaciones":[{"ip_dst": notas,  "puertos": [80, 443]}]
+                "permisos":    [{"ip_dst": cursos, "puertos": [8001, 1443]}],
+                "denegaciones":[]
+            }
+        if vlan_id == 220:                # Informatica
+            return {
+                "permisos": [
+                    {"ip_dst": cursos, "puertos": [8002, 2443]},
+                    {"ip_dst": notas,  "puertos": [8080]},
+                ],
+                "denegaciones": []
+            }
+        if vlan_id == 230:                # Electronica
+            return {
+                "permisos":    [{"ip_dst": cursos, "puertos": [8003, 3443]}],
+                "denegaciones":[]
             }
         elif vlan_id in (300, 400):        # Docentes y Admin — cursos + notas
             return {
                 "permisos": [
-                    {"ip_dst": cursos, "puertos": [80, 443]},
-                    {"ip_dst": notas,  "puertos": [80, 443]}
+                    {"ip_dst": cursos, "puertos": [8001, 1443, 8002, 2443, 8003, 3443]},
+                    {"ip_dst": notas,  "puertos": [8080]}
                 ],
                 "denegaciones": []
             }
@@ -647,8 +689,8 @@ class PolicyEngine:
             return {
                 "permisos": [],
                 "denegaciones": [
-                    {"ip_dst": cursos, "puertos": [80, 443]},
-                    {"ip_dst": notas,  "puertos": [80, 443]}
+                    {"ip_dst": cursos, "puertos": [8001, 1443, 8002, 2443, 8003, 3443]},
+                    {"ip_dst": notas,  "puertos": [8080]}
                 ]
             }
 
@@ -763,6 +805,91 @@ class ONOSClient:
         print(f"  [ONOS] Host {ip_asignada} no encontrado en ONOS")
         return None
 
+    def get_hosts(self):
+        """Devuelve la lista cruda de hosts aprendidos por ONOS."""
+        if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
+            return []
+        try:
+            resp = requests.get(
+                f"{self.url}/onos/v1/hosts", auth=self.auth, timeout=3
+            )
+            if resp.status_code == 200:
+                return resp.json().get("hosts", [])
+            print(f"  [ONOS] Error GET /hosts: HTTP {resp.status_code}")
+        except Exception as e:
+            print(f"  [ONOS] Error GET /hosts: {e}")
+        return []
+
+    def get_links(self):
+        """Devuelve la lista cruda de enlaces inter-switch vistos por ONOS."""
+        if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
+            return []
+        try:
+            resp = requests.get(
+                f"{self.url}/onos/v1/links", auth=self.auth, timeout=3
+            )
+            if resp.status_code == 200:
+                return resp.json().get("links", [])
+            print(f"  [ONOS] Error GET /links: HTTP {resp.status_code}")
+        except Exception as e:
+            print(f"  [ONOS] Error GET /links: {e}")
+        return []
+
+    def calcular_pasos(self, src_switch, src_port, dst_switch, dst_port):
+        """
+        Calcula pasos hop-by-hop usando /onos/v1/links.
+        Retorna [(device_id, in_port, out_port), ...].
+        """
+        if src_switch == dst_switch:
+            return [(src_switch, int(src_port), int(dst_port))]
+
+        links = self.get_links()
+        adjacency = defaultdict(list)
+        link_by_pair = {}
+        for link in links:
+            src = link.get("src", {})
+            dst = link.get("dst", {})
+            src_dev, dst_dev = src.get("device"), dst.get("device")
+            src_p, dst_p = src.get("port"), dst.get("port")
+            if not (src_dev and dst_dev and str(src_p).isdigit()
+                    and str(dst_p).isdigit()):
+                continue
+            adjacency[src_dev].append(dst_dev)
+            link_by_pair.setdefault((src_dev, dst_dev), (int(src_p), int(dst_p)))
+
+        queue = deque([(src_switch, [src_switch])])
+        visited = {src_switch}
+        path = None
+        while queue:
+            current, current_path = queue.popleft()
+            for neighbor in sorted(adjacency.get(current, [])):
+                if neighbor in visited:
+                    continue
+                next_path = current_path + [neighbor]
+                if neighbor == dst_switch:
+                    path = next_path
+                    queue.clear()
+                    break
+                visited.add(neighbor)
+                queue.append((neighbor, next_path))
+
+        if not path:
+            print(f"  [ONOS] Sin camino {src_switch} → {dst_switch}")
+            return []
+
+        steps = []
+        in_port = int(src_port)
+        for current, nxt in zip(path, path[1:]):
+            link_ports = link_by_pair.get((current, nxt))
+            if not link_ports:
+                print(f"  [ONOS] Link incompleto {current} → {nxt}")
+                return []
+            out_port, next_in_port = link_ports
+            steps.append((current, in_port, out_port))
+            in_port = next_in_port
+        steps.append((dst_switch, in_port, int(dst_port)))
+        return steps
+
     def get_devices(self):
         """Lista de deviceIds disponibles en ONOS."""
         if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
@@ -841,6 +968,8 @@ class M6Translator:
         self.policies = PolicyEngine()
         self._lock = threading.Lock()
         self.flows_por_sesion = {}  # {mac: [(device_id, flow_id), ...]}
+        self.flows_portal = {}      # {mac: [(device_id, flow_id), ...]}
+        self.portal_ips = {}        # {mac: ip_asignada}
         self.mitigaciones = {}
         self._security_windows = defaultdict(deque)
 
@@ -853,6 +982,194 @@ class M6Translator:
                 self.flows_por_sesion.setdefault(mac, [])
                 self.flows_por_sesion[mac].append((device_id, fid))
         return fid
+
+    def _instalar_camino_tcp(self, mac_sesion, src_host, dst_host,
+                             src_ip, dst_ip, tcp_port, session_timeout):
+        """
+        Instala ida y retorno para un permiso TCP usando rutas explicitas.
+        No usa OUTPUT NORMAL: cada switch recibe su in_port/out_port exacto.
+        """
+        ida = self.onos.calcular_pasos(
+            src_host["switch_dpid"], src_host["in_port"],
+            dst_host["switch_dpid"], dst_host["in_port"]
+        )
+        retorno = self.onos.calcular_pasos(
+            dst_host["switch_dpid"], dst_host["in_port"],
+            src_host["switch_dpid"], src_host["in_port"]
+        )
+        if not ida or not retorno:
+            return 0
+
+        instalados = 0
+        for device_id, in_port, out_port in ida:
+            fid = self._instalar_y_cachear(
+                device_id,
+                self.builder.t0_allow_tcp_path(
+                    device_id, in_port,
+                    src_host["mac"], dst_host["mac"],
+                    src_ip, dst_ip, tcp_port, out_port,
+                    direction="dst",
+                    session_timeout=session_timeout,
+                ),
+                mac_sesion,
+            )
+            if fid:
+                instalados += 1
+
+        for device_id, in_port, out_port in retorno:
+            fid = self._instalar_y_cachear(
+                device_id,
+                self.builder.t0_allow_tcp_path(
+                    device_id, in_port,
+                    dst_host["mac"], src_host["mac"],
+                    dst_ip, src_ip, tcp_port, out_port,
+                    direction="src",
+                    session_timeout=session_timeout,
+                ),
+                mac_sesion,
+            )
+            if fid:
+                instalados += 1
+
+        return instalados
+
+    def _eliminar_flows_portal(self, mac):
+        mac = mac.lower()
+        with self._lock:
+            flows = self.flows_portal.pop(mac, [])
+            self.portal_ips.pop(mac, None)
+        for device_id, flow_id in flows:
+            self.onos.eliminar_flow(device_id, flow_id)
+        return len(flows)
+
+    def _instalar_camino_portal(self, host, portal_host, ip_host, ttl=900):
+        """
+        Instala cuarentena minima host<->portal TCP/8282. Estos flows no son
+        de sesion autenticada: se guardan aparte para no afectar a otros hosts.
+        """
+        mac = host["mac"].lower()
+        self._eliminar_flows_portal(mac)
+
+        ida = self.onos.calcular_pasos(
+            host["switch_dpid"], host["in_port"],
+            portal_host["switch_dpid"], portal_host["in_port"]
+        )
+        retorno = self.onos.calcular_pasos(
+            portal_host["switch_dpid"], portal_host["in_port"],
+            host["switch_dpid"], host["in_port"]
+        )
+        if not ida or not retorno:
+            return 0
+
+        instalados = []
+        for device_id, in_port, out_port in ida:
+            fid = self.onos.instalar_flow(
+                device_id,
+                self.builder.t0_allow_tcp_path(
+                    device_id, in_port,
+                    host["mac"], portal_host["mac"],
+                    ip_host, Config.PORTAL_IP, 8282, out_port,
+                    direction="dst",
+                    session_timeout=ttl,
+                )
+            )
+            if fid:
+                instalados.append((device_id, fid))
+
+        for device_id, in_port, out_port in retorno:
+            fid = self.onos.instalar_flow(
+                device_id,
+                self.builder.t0_allow_tcp_path(
+                    device_id, in_port,
+                    portal_host["mac"], host["mac"],
+                    Config.PORTAL_IP, ip_host, 8282, out_port,
+                    direction="src",
+                    session_timeout=ttl,
+                )
+            )
+            if fid:
+                instalados.append((device_id, fid))
+
+        if instalados:
+            with self._lock:
+                self.flows_portal[mac] = instalados
+                self.portal_ips[mac] = ip_host
+        return len(instalados)
+
+    def sincronizar_portal_cuarentena(self):
+        """
+        Lee hosts ONOS y prepara acceso minimo al portal para clientes de datos.
+        No abre recursos, no usa NORMAL y excluye servidores/portal/DHCP.
+        """
+        portal = self.onos.get_host_by_ip(Config.PORTAL_IP)
+        if not portal:
+            return {"ok": False, "error": "portal_no_aprendido_en_onos"}
+
+        excluidas = {
+            Config.PORTAL_IP,
+            Config.SERVER_CURSOS,
+            Config.SERVER_NOTAS,
+            "192.168.100.254",
+        }
+        resultados = []
+        vistos = set()
+        for h in self.onos.get_hosts():
+            locs = h.get("locations") or []
+            if not locs:
+                continue
+            mac = h.get("mac")
+            if not mac or mac.upper() == portal["mac"].upper():
+                continue
+            for ip in h.get("ipAddresses", []):
+                if not ip.startswith("192.168.100.") or ip in excluidas:
+                    continue
+                key = (mac.lower(), ip)
+                if key in vistos:
+                    continue
+                vistos.add(key)
+                mac_key = mac.lower()
+                with self._lock:
+                    ya_instalado = (
+                        self.portal_ips.get(mac_key) == ip
+                        and bool(self.flows_portal.get(mac_key))
+                    )
+                host = {
+                    "mac": mac,
+                    "switch_dpid": locs[0]["elementId"],
+                    "in_port": int(locs[0]["port"]),
+                }
+                n = (
+                    len(self.flows_portal.get(mac_key, []))
+                    if ya_instalado
+                    else self._instalar_camino_portal(host, portal, ip)
+                )
+                resultados.append({
+                    "ip": ip,
+                    "mac": mac,
+                    "switch_dpid": host["switch_dpid"],
+                    "in_port": host["in_port"],
+                    "flows": n,
+                    "reused": ya_instalado,
+                })
+                break
+        return {"ok": True, "hosts": resultados, "total": len(resultados)}
+
+    def iniciar_sincronizador_portal(self):
+        intervalo = Config.PORTAL_SYNC_INTERVAL
+        if intervalo <= 0:
+            print("[M6] Portal sync periódico deshabilitado")
+            return
+
+        def loop():
+            print(f"[M6] Portal sync periódico cada {intervalo}s")
+            while True:
+                try:
+                    self.sincronizar_portal_cuarentena()
+                except Exception as exc:
+                    print(f"[M6] portal_sync error: {exc}")
+                time.sleep(intervalo)
+
+        threading.Thread(target=loop, daemon=True).start()
 
     def _buscar_sesion(self, src_ip, src_mac, switch_dpid, in_port, data):
         """Resuelve la sesión sin conectar a MySQL salvo habilitación explícita."""
@@ -1216,6 +1533,7 @@ class M6Translator:
         mac         = token["mac"]
         switch_dpid = token["switch_dpid"]
         in_port     = int(token["in_port"])
+        session_timeout = int(token.get("session_timeout", 28800))
 
         nombre_sw = Config.SWITCH_NOMBRES.get(switch_dpid, switch_dpid[-8:])
         print(f"\n[M6] ── Token de M1 ──────────────────────────────")
@@ -1227,7 +1545,9 @@ class M6Translator:
         print(f"  [T1] SET_FIELD VLAN {Config.VLAN_CUARENTENA}→{vlan_id}...")
         self._instalar_y_cachear(
             switch_dpid,
-            self.builder.set_vlan_post_auth(switch_dpid, mac, in_port, vlan_id),
+            self.builder.set_vlan_post_auth(
+                switch_dpid, mac, in_port, vlan_id, session_timeout
+            ),
             mac
         )
 
@@ -1235,7 +1555,9 @@ class M6Translator:
         print(f"  [T0] Return flow → puerto {in_port}...")
         self._instalar_y_cachear(
             switch_dpid,
-            self.builder.t0_return_flow(switch_dpid, mac, in_port),
+            self.builder.t0_return_flow(
+                switch_dpid, mac, in_port, session_timeout
+            ),
             mac
         )
 
@@ -1255,28 +1577,51 @@ class M6Translator:
         # 3. Instalar flows de política
         n_allow, n_deny = 0, 0
         print(f"  Instalando enforcement...")
+        host_origen = {
+            "mac": mac,
+            "switch_dpid": switch_dpid,
+            "in_port": in_port,
+        }
 
         for permiso in politicas.get("permisos", []):
             ip_dst = permiso["ip_dst"]
-            self._instalar_y_cachear(
-                switch_dpid,
-                self.builder.t0_allow_usuario(
-                    switch_dpid, mac, ip_dst, out_port="NORMAL"
-                ),
-                mac
-            )
-            n_allow += 1
+            host_destino = self.onos.get_host_by_ip(ip_dst)
+            if not host_destino:
+                print(f"    ! {ip_dst}: destino no aprendido en ONOS; "
+                      f"no se instala OUTPUT NORMAL")
+                continue
+
+            puertos = permiso.get("puertos") or []
+            if not puertos:
+                print(f"    ! {ip_dst}: permiso sin puerto TCP; se omite "
+                      f"para evitar allow amplio")
+                continue
+
+            for tcp_port in puertos:
+                flows = self._instalar_camino_tcp(
+                    mac, host_origen, host_destino,
+                    ip_asignada, ip_dst, tcp_port, session_timeout
+                )
+                if flows:
+                    n_allow += 1
+                    print(f"    ✓ {ip_dst}:{tcp_port} — {flows} flows ruta")
+                else:
+                    print(f"    ! {ip_dst}:{tcp_port} — sin ruta completa")
 
         for denegacion in politicas.get("denegaciones", []):
             ip_dst = denegacion["ip_dst"]
             self._instalar_y_cachear(
                 switch_dpid,
-                self.builder.t3_deny_sesion(switch_dpid, mac, ip_asignada, ip_dst),
+                self.builder.t3_deny_sesion(
+                    switch_dpid, mac, ip_asignada, ip_dst, session_timeout
+                ),
                 mac
             )
             self._instalar_y_cachear(
                 switch_dpid,
-                self.builder.t0_deny_usuario(switch_dpid, mac, ip_dst),
+                self.builder.t0_deny_usuario(
+                    switch_dpid, mac, ip_dst, session_timeout
+                ),
                 mac
             )
             n_deny += 1
@@ -1521,6 +1866,13 @@ def endpoint_cerrar_sesion():
     return jsonify({"ok": True}), 200
 
 
+@app.route("/m6/portal/sync", methods=["POST"])
+def endpoint_portal_sync():
+    """Instala rutas explicitas host<->portal TCP/8282 para hosts aprendidos."""
+    resultado = m6.sincronizar_portal_cuarentena()
+    return jsonify(resultado), 200 if resultado.get("ok") else 400
+
+
 @app.route("/m6/mitigacion", methods=["POST"])
 def endpoint_mitigacion():
     """M4 llama aquí al detectar un atacante."""
@@ -1588,6 +1940,8 @@ def endpoint_status():
     with m6._lock:
         sesiones = {mac: len(flows)
                     for mac, flows in m6.flows_por_sesion.items()}
+        portal_flows = {mac: len(flows)
+                        for mac, flows in m6.flows_portal.items()}
     return jsonify({
         "status":           "ok",
         "onos_url":         Config.ONOS_URL,
@@ -1595,12 +1949,14 @@ def endpoint_status():
         "mysql_disponible": MYSQL_OK,
         "devices_onos":     devices,
         "sesiones_activas": sesiones,
+        "portal_flows":     portal_flows,
         "network_actions_enabled": Config.NETWORK_ACTIONS_ENABLED,
         "onos_writes_enabled": Config.ONOS_WRITES_ENABLED,
         "onos_reads_enabled": Config.ONOS_READS_ENABLED,
         "ovsdb_actions_enabled": Config.OVSDB_ACTIONS_ENABLED,
         "automatic_actions_enabled": Config.M4_AUTOMATIC_ACTIONS_ENABLED,
         "startup_flow_install_enabled": Config.STARTUP_FLOW_INSTALL_ENABLED,
+        "portal_sync_interval": Config.PORTAL_SYNC_INTERVAL,
     }), 200
 
 
@@ -1626,6 +1982,8 @@ if __name__ == "__main__":
         m6.instalar_cuarentena_arranque()
     else:
         print("[M6] Arranque seguro: no se instalarán flows en ONOS")
+
+    m6.iniciar_sincronizador_portal()
 
     print(f"[M6] API escuchando en {Config.M6_HOST}:{Config.M6_PORT}\n")
     app.run(host=Config.M6_HOST, port=Config.M6_PORT,

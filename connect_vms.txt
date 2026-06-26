@@ -1,0 +1,78 @@
+# ============================================
+# ACCESO A VIRTUAL MACHINES
+# IP: 10.20.11.32
+# Usuario: ubuntu
+# Password: ubuntu (para SSH y para sudo)
+# ============================================
+
+# Gateway - Puerto 22
+ssh ubuntu@10.20.11.32 -p 22
+# Después de entrar:
+# sudo -i
+# Password: ubuntu
+# ls
+
+# ONOS - Puerto 5800
+ssh ubuntu@10.20.11.32 -p 5800
+# sudo -i (password: ubuntu)
+# ls
+
+# AAA-policies - Puerto 5851
+ssh ubuntu@10.20.11.32 -p 5851
+# sudo -i (password: ubuntu)
+# ls
+
+# monitoring - Puerto 5852
+ssh ubuntu@10.20.11.32 -p 5852
+# sudo -i (password: ubuntu)
+# ls
+
+# SW1 - Puerto 5801
+ssh ubuntu@10.20.11.32 -p 5801
+# sudo -i (password: ubuntu)
+# ls
+
+# SW2 - Puerto 5802
+ssh ubuntu@10.20.11.32 -p 5802
+# sudo -i (password: ubuntu)
+# ls
+
+# SW3 - Puerto 5803
+ssh ubuntu@10.20.11.32 -p 5803
+# sudo -i (password: ubuntu)
+# ls
+
+# SW4 - Puerto 5804
+ssh ubuntu@10.20.11.32 -p 5804
+# sudo -i (password: ubuntu)
+# ls
+
+# SW5 - Puerto 5805
+ssh ubuntu@10.20.11.32 -p 5805
+# sudo -i (password: ubuntu)
+# ls
+
+# H1 - Puerto 5811
+ssh ubuntu@10.20.11.32 -p 5811
+# sudo -i (password: ubuntu)
+# ls
+
+# H2 - Puerto 5812
+ssh ubuntu@10.20.11.32 -p 5812
+# sudo -i (password: ubuntu)
+# ls
+
+# H3 - Puerto 5813
+ssh ubuntu@10.20.11.32 -p 5813
+# sudo -i (password: ubuntu)
+# ls
+
+# recursos-academicos (srv1) - Puerto 5821
+ssh ubuntu@10.20.11.32 -p 5821
+# sudo -i (password: ubuntu)
+# ls
+
+# sistema-notas (srv2) - Puerto 5822
+ssh ubuntu@10.20.11.32 -p 5822
+# sudo -i (password: ubuntu)
+# ls

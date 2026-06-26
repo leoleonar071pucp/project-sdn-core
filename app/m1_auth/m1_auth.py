@@ -64,7 +64,7 @@ class Config:
     #   - No se llama a resolver_host() ni emitir_token()
     #   - Se usan mac/switch_dpid/in_port "dummy" para poder seguir
     #     probando el registro en sesiones_activas / ip_mac_binding
-    M6_HABILITADO = False
+    M6_HABILITADO = True
 
     # Valores dummy usados solo cuando M6_HABILITADO = False
     # ADVERTENCIA: como todos los logins de prueba usan la MISMA MAC dummy,
@@ -598,12 +598,14 @@ class TokenEmitter:
         return None
 
     def emitir_token(self, codigo_pucp, nombre_rol, vlan_id,
-                     ip_asignada, mac, switch_dpid, in_port):
+                     ip_asignada, mac, switch_dpid, in_port,
+                     session_timeout=28800):
         """Segunda llamada — instala flows. Solo tras registrar en DB."""
         token = {
             "codigo_pucp": codigo_pucp, "nombre_rol": nombre_rol,
             "vlan_id": vlan_id, "ip_asignada": ip_asignada,
-            "mac": mac, "switch_dpid": switch_dpid, "in_port": in_port
+            "mac": mac, "switch_dpid": switch_dpid, "in_port": in_port,
+            "session_timeout": session_timeout
         }
         resultado = self._llamar_m6("/m6/token_rol", token)
         if resultado:
@@ -715,7 +717,8 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
     if Config.M6_HABILITADO:
         # --- INICIO bloque M6 real ---
         _tokens.emitir_token(codigo_pucp, nombre_rol, vlan_id,
-                              ip_asignada, mac, switch_dpid, in_port)
+                              ip_asignada, mac, switch_dpid, in_port,
+                              session_timeout)
         # --- FIN bloque M6 real ---
     else:
         print("  [MODO PRUEBA] M6 deshabilitado — no se emite token (no se "
@@ -801,7 +804,8 @@ def autenticar_visitante(correo: str, password: str, ip_asignada: str) -> dict:
     if Config.M6_HABILITADO:
         # --- INICIO bloque M6 real ---
         _tokens.emitir_token(correo, nombre_rol, vlan_id,
-                              ip_asignada, mac, switch_dpid, in_port)
+                              ip_asignada, mac, switch_dpid, in_port,
+                              Config.VISITANTE_TIMEOUT_SEG)
         # --- FIN bloque M6 real ---
     else:
         print("  [MODO PRUEBA] M6 deshabilitado — no se emite token")

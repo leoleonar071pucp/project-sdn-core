@@ -403,7 +403,7 @@ class CaptivePortalCLI:
 
 def main():
     parser = argparse.ArgumentParser(description="Cliente CLI del Portal Cautivo PUCP")
-    parser.add_argument("--host", default="192.168.100.100",help="IP del servidor del portal cautivo (VM-Auth)")
+    parser.add_argument("--host", default="192.168.100.110",help="IP del servidor del portal cautivo (VM-Auth)")
     parser.add_argument("--port", default="8282", help="Puerto del servidor del portal cautivo")
     args = parser.parse_args()
 
