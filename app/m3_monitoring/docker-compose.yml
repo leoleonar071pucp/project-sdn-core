@@ -2,9 +2,10 @@ services:
 
   suricata:
     image: jasonish/suricata:7.0
-    profiles: ["deployment"]
-
+    container_name: suricata
     network_mode: host
+
+    command: -c /etc/suricata/suricata.yaml --dpdk
 
     cap_add:
       - NET_ADMIN
@@ -14,28 +15,38 @@ services:
       - IPC_LOCK
 
     volumes:
-      - ./suricata/suricata.yaml:/etc/suricata/suricata.yaml:ro
-      - ./suricata/rules:/etc/suricata/rules:ro
-      - ./suricata/critical-assets.yaml:/etc/suricata/critical-assets.yaml:ro
+      - ./suricata/suricata.yaml:/etc/suricata/suricata.yaml  #:ro
+      - ./suricata/rules:/etc/suricata/rules  #:ro 
+      # - ./suricata:/etc/suricata
       - ./logs:/var/log/suricata
       - /dev/hugepages:/dev/hugepages
 
     restart: unless-stopped
 
-
   evebox:
     image: jasonish/evebox:latest
+    container_name: evebox
+    profiles: ["dashboard"]
+
     depends_on:
       - suricata
+
     ports:
       - "8181:5636"
+
     command:
-      - evebox
       - server
-      - "-D"
-      - "/var/log/suricata/eve.json"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5636"
+      - --datadir
+      - /var/lib/evebox
+      - --input
+      - /var/log/suricata/eve.json
+
     volumes:
-      - ./logs:/var/log/suricata
+      - ./logs:/var/log/suricata:ro
       - ./evebox:/var/lib/evebox
 
     restart: unless-stopped
