@@ -1942,6 +1942,7 @@ def endpoint_status():
                     for mac, flows in m6.flows_por_sesion.items()}
         portal_flows = {mac: len(flows)
                         for mac, flows in m6.flows_portal.items()}
+        portal_ips = dict(m6.portal_ips)
     return jsonify({
         "status":           "ok",
         "onos_url":         Config.ONOS_URL,
@@ -1950,6 +1951,7 @@ def endpoint_status():
         "devices_onos":     devices,
         "sesiones_activas": sesiones,
         "portal_flows":     portal_flows,
+        "portal_ips":       portal_ips,
         "network_actions_enabled": Config.NETWORK_ACTIONS_ENABLED,
         "onos_writes_enabled": Config.ONOS_WRITES_ENABLED,
         "onos_reads_enabled": Config.ONOS_READS_ENABLED,

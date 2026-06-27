@@ -411,6 +411,24 @@ Recomendacion: crear scripts de despliegue/configuracion para que todo sea repro
 
 ## Comandos utiles de verificacion
 
+## Verificacion 2026-06-26
+
+Se probo H1, H2 y H3 usando DHCP temporal en `ens4`, sin modificar netplan.
+
+| Host | IP DHCP | Portal | Login | Recurso | Logout | Recurso despues de logout |
+| --- | --- | --- | --- | --- | --- | --- |
+| H1 | 192.168.100.55 | HTTP 200 | OK, Estudiante_Telecom | HTTP 200 | OK | bloqueado |
+| H2 | 192.168.100.56 | HTTP 200 | OK, Estudiante_Electronica | HTTP 200 | OK | bloqueado |
+| H3 | 192.168.100.54 | HTTP 200 | OK, Estudiante_Informatica | HTTP 200 | OK | bloqueado |
+
+Fallo encontrado durante la prueba: H2 y H3 habian recibido nuevas IPs por DHCP,
+pero ONOS aun tenia flows antiguos del portal que matcheaban IPs previas
+(`192.168.100.13` y `192.168.100.12`). Se limpio solo ese conjunto de flows
+TCP/8282 obsoleto y se reinicio M6 con `STARTUP_FLOW_INSTALL_ENABLED=false`.
+
+M6 ahora expone `portal_ips` en `/m6/status` para confirmar que el cache de flows
+del portal corresponde a la IP DHCP actual de cada MAC.
+
 ### ONOS
 
 ```bash
