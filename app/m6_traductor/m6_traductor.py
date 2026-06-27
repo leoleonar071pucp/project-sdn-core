@@ -156,6 +156,7 @@ class Config:
     PRIO_T0_PORTAL  = 200     # T0: ruta directa portal
     PRIO_T0_USUARIO = 35000   # T0: enforcement por MAC post-auth
     PRIO_T0_ATAQUE  = 5000    # T0: bloqueo atacante (instalado por M4)
+    DATA_FLOW_TIMEOUT = int(os.getenv("DATA_FLOW_TIMEOUT", "300"))
 
     # VLANs por rol
     VLAN_CUARENTENA = 90
@@ -409,6 +410,45 @@ class FlowBuilder:
             "treatment": {"instructions": [
                 {"type": "OUTPUT", "port": int(out_port)}
             ]}
+        }
+
+    def tcp_path_table_flow(self, device_id, table_id, in_port, src_mac, dst_mac,
+                            src_ip, dst_ip, tcp_port, out_port=None,
+                            direction="dst", next_table=None,
+                            session_timeout=300, priority=None):
+        """
+        Flow estricto para pipeline multi-tabla.
+        - Si next_table existe: valida el match y hace goto a la siguiente tabla.
+        - Si out_port existe: entrega al puerto exacto del siguiente salto.
+        """
+        tcp_match = (
+            {"type": "TCP_SRC", "tcpPort": int(tcp_port)}
+            if direction == "src"
+            else {"type": "TCP_DST", "tcpPort": int(tcp_port)}
+        )
+        instructions = []
+        if next_table is not None:
+            instructions.append({"type": "TABLE", "tableId": int(next_table)})
+        elif out_port is not None:
+            instructions.append({"type": "OUTPUT", "port": int(out_port)})
+
+        return {
+            "priority":    priority or Config.PRIO_T0_USUARIO,
+            "isPermanent": False,
+            "timeout":     int(session_timeout),
+            "deviceId":    device_id,
+            "tableId":     int(table_id),
+            "selector": {"criteria": [
+                {"type": "IN_PORT",  "port": int(in_port)},
+                {"type": "ETH_SRC",  "mac":  src_mac},
+                {"type": "ETH_DST",  "mac":  dst_mac},
+                {"type": "ETH_TYPE", "ethType": "0x0800"},
+                {"type": "IP_PROTO", "protocol": 6},
+                {"type": "IPV4_SRC", "ip": f"{src_ip}/32"},
+                {"type": "IPV4_DST", "ip": f"{dst_ip}/32"},
+                tcp_match
+            ]},
+            "treatment": {"instructions": instructions}
         }
 
     def t0_deny_usuario(self, device_id, mac, ip_dst, session_timeout=28800):
@@ -987,8 +1027,14 @@ class M6Translator:
                              src_ip, dst_ip, tcp_port, session_timeout):
         """
         Instala ida y retorno para un permiso TCP usando rutas explicitas.
-        No usa OUTPUT NORMAL: cada switch recibe su in_port/out_port exacto.
+        Pipeline post-login:
+          T0 clasifica el flujo exacto y salta a T1.
+          T1 valida la sesion exacta y salta a T2.
+          T2 entrega al puerto exacto del siguiente salto.
+        No usa OUTPUT NORMAL.
         """
+        data_timeout = min(int(session_timeout or Config.DATA_FLOW_TIMEOUT),
+                           Config.DATA_FLOW_TIMEOUT)
         ida = self.onos.calcular_pasos(
             src_host["switch_dpid"], src_host["in_port"],
             dst_host["switch_dpid"], dst_host["in_port"]
@@ -1002,34 +1048,72 @@ class M6Translator:
 
         instalados = 0
         for device_id, in_port, out_port in ida:
-            fid = self._instalar_y_cachear(
-                device_id,
-                self.builder.t0_allow_tcp_path(
-                    device_id, in_port,
+            for flow in (
+                self.builder.tcp_path_table_flow(
+                    device_id, 0, in_port,
                     src_host["mac"], dst_host["mac"],
-                    src_ip, dst_ip, tcp_port, out_port,
+                    src_ip, dst_ip, tcp_port,
                     direction="dst",
-                    session_timeout=session_timeout,
+                    next_table=1,
+                    session_timeout=data_timeout,
+                    priority=Config.PRIO_T0_USUARIO,
                 ),
-                mac_sesion,
-            )
-            if fid:
-                instalados += 1
+                self.builder.tcp_path_table_flow(
+                    device_id, 1, in_port,
+                    src_host["mac"], dst_host["mac"],
+                    src_ip, dst_ip, tcp_port,
+                    direction="dst",
+                    next_table=2,
+                    session_timeout=data_timeout,
+                    priority=Config.PRIO_SESION_T1,
+                ),
+                self.builder.tcp_path_table_flow(
+                    device_id, 2, in_port,
+                    src_host["mac"], dst_host["mac"],
+                    src_ip, dst_ip, tcp_port,
+                    out_port=out_port,
+                    direction="dst",
+                    session_timeout=data_timeout,
+                    priority=Config.PRIO_T2_ALLOW,
+                ),
+            ):
+                fid = self._instalar_y_cachear(device_id, flow, mac_sesion)
+                if fid:
+                    instalados += 1
 
         for device_id, in_port, out_port in retorno:
-            fid = self._instalar_y_cachear(
-                device_id,
-                self.builder.t0_allow_tcp_path(
-                    device_id, in_port,
+            for flow in (
+                self.builder.tcp_path_table_flow(
+                    device_id, 0, in_port,
                     dst_host["mac"], src_host["mac"],
-                    dst_ip, src_ip, tcp_port, out_port,
+                    dst_ip, src_ip, tcp_port,
                     direction="src",
-                    session_timeout=session_timeout,
+                    next_table=1,
+                    session_timeout=data_timeout,
+                    priority=Config.PRIO_T0_USUARIO,
                 ),
-                mac_sesion,
-            )
-            if fid:
-                instalados += 1
+                self.builder.tcp_path_table_flow(
+                    device_id, 1, in_port,
+                    dst_host["mac"], src_host["mac"],
+                    dst_ip, src_ip, tcp_port,
+                    direction="src",
+                    next_table=2,
+                    session_timeout=data_timeout,
+                    priority=Config.PRIO_SESION_T1,
+                ),
+                self.builder.tcp_path_table_flow(
+                    device_id, 2, in_port,
+                    dst_host["mac"], src_host["mac"],
+                    dst_ip, src_ip, tcp_port,
+                    out_port=out_port,
+                    direction="src",
+                    session_timeout=data_timeout,
+                    priority=Config.PRIO_T2_ALLOW,
+                ),
+            ):
+                fid = self._instalar_y_cachear(device_id, flow, mac_sesion)
+                if fid:
+                    instalados += 1
 
         return instalados
 

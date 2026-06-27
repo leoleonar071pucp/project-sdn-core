@@ -429,6 +429,40 @@ TCP/8282 obsoleto y se reinicio M6 con `STARTUP_FLOW_INSTALL_ENABLED=false`.
 M6 ahora expone `portal_ips` en `/m6/status` para confirmar que el cache de flows
 del portal corresponde a la IP DHCP actual de cada MAC.
 
+## Verificacion pipeline T0/T1/T2 2026-06-26
+
+Se migro la instalacion de flows post-login de recursos desde una sola tabla T0
+hacia un pipeline multi-tabla conservador:
+
+| Tabla | Funcion actual |
+| --- | --- |
+| T0 | Clasifica el flujo exacto de sesion y hace `goto T1`. Tambien mantiene DHCP/portal base. |
+| T1 | Valida el mismo flujo exacto de sesion y hace `goto T2`. |
+| T2 | Aplica el permiso del recurso y hace `OUTPUT` al puerto exacto del siguiente salto. |
+| T3 | Reservada para bloqueos/deny extraordinarios; no se usa en el flujo normal probado. |
+
+No se activo `org.onosproject.fwd`, no se uso `OUTPUT NORMAL` para recursos y no
+se modifico netplan. Los flows de datos usan `DATA_FLOW_TIMEOUT=300` segundos.
+
+Resultado probado:
+
+| Host | Portal | Login | Recurso | Logout | Resultado posterior |
+| --- | --- | --- | --- | --- | --- |
+| H1 | HTTP 200 | OK | HTTP 200 | OK | recurso bloqueado |
+| H2 | HTTP 200 | OK | HTTP 200 | OK | recurso bloqueado |
+| H3 | HTTP 200 | OK | HTTP 200 | OK | recurso bloqueado |
+
+Durante una sesion activa se observaron flows reales en T0, T1 y T2. Al cerrar
+sesion, `sesiones_activas` quedo vacio y ONOS volvio a mantener solo flows base
+en T0. El contenedor ONOS se observo estable despues de las pruebas:
+
+```text
+CPU aproximada: 2.51%
+Memoria: 1.294 GiB / 3.823 GiB
+fwd: INSTALLED, no ACTIVE
+STARTUP_FLOW_INSTALL_ENABLED=false
+```
+
 ### ONOS
 
 ```bash
