@@ -26,7 +26,6 @@ services:
   evebox:
     image: jasonish/evebox:latest
     container_name: evebox
-    profiles: ["dashboard"]
 
     depends_on:
       - suricata
@@ -35,6 +34,7 @@ services:
       - "8181:5636"
 
     command:
+      - evebox
       - server
       - --host
       - 0.0.0.0
@@ -42,6 +42,8 @@ services:
       - "5636"
       - --datadir
       - /var/lib/evebox
+      - --datastore
+      - sqlite
       - --input
       - /var/log/suricata/eve.json
 
