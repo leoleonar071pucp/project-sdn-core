@@ -15,7 +15,7 @@ alert http any any -> $HOME_NET any (msg:"SDN DEMO possible SQL injection"; flow
 
 
 # 5. Command Injection en POST body
-alert http any any -> $HOME_NET any (msg:"SDN DEMO suspicious command in HTTP"; flow:to_server, established; http.request_body; pcre:"/\b(cmd\.exe|powershell|wget|curl|\/bin\/sh|nc\s+-e)\b/Ui"; classtype:web-application-attack; priority:2; sid:9000003; rev:2;)
+# alert http any any -> $HOME_NET any (msg:"SDN DEMO suspicious command in HTTP"; flow:to_server, established; http.request_body; pcre:"/\b(cmd\.exe|powershell|wget|curl|\/bin\/sh|nc\s+-e)\b/Ui"; classtype:web-application-attack; priority:2; sid:9000003; rev:2;)
 
 
 # 6. Malware marker en POST body
@@ -51,7 +51,7 @@ alert arp !192.168.100.1 any -> any any (msg:"SDN DEMO possible ARP spoofing"; a
 
 
 # 14. HTTP en puerto no estándar (ni 8080 ni 443)
-alert tcp any any -> $HOME_NET ![8080,443] (msg:"SDN DEMO HTTP on non-standard port"; flow:to_server, established; app-layer:http; classtype:attempted-recon; priority:3; sid:9000024; rev:1;)
+alert tcp any any -> $HOME_NET any (msg:"SDN DEMO HTTP on non-standard port"; flow:to_server, established; app-layer:http; classtype:attempted-recon; priority:3; sid:9000024; rev:1;)
 
 
 # 15. FTP Exfiltración (comando STOR en puerto 21)

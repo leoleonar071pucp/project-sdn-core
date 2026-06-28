@@ -6,7 +6,7 @@ services:
     network_mode: host
 
     command: -c /etc/suricata/suricata.yaml --dpdk
-
+    privileged: true
     cap_add:
       - NET_ADMIN
       - NET_RAW

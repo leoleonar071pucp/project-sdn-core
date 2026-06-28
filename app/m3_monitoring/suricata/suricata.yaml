@@ -145,6 +145,8 @@ app-layer:
       udp:
         detection-ports:
           dp: [53]
+    arp:
+      enabled: yes
     # Otros protocolos...
 
 
