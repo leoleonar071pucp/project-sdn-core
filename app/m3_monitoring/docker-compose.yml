@@ -6,13 +6,13 @@ services:
     network_mode: host
 
     command: -c /etc/suricata/suricata.yaml --dpdk
-    privileged: true
     cap_add:
       - NET_ADMIN
       - NET_RAW
       - SYS_ADMIN
       - SYS_NICE
       - IPC_LOCK
+    privileged: true
 
     volumes:
       - ./suricata/suricata.yaml:/etc/suricata/suricata.yaml  #:ro

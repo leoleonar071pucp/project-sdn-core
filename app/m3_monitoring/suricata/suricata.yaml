@@ -24,7 +24,7 @@ dpdk:
       threads: auto
       promisc: true
       checksum-checks: true
-      mtu: 2000     # Modificar segun tráfico GRE
+      mtu: 1500     # Modificar segun tráfico GRE
 
 # ------------------ Threading ------------------
 threading:
