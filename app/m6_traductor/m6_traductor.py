@@ -13,10 +13,11 @@ Topología real (confirmada):
   verificado con curl que responde por esa ruta.
 
 Pipeline OpenFlow implementado:
-  T0 (tabla 0): Rutas directas portal + enforcement por MAC + bloqueo atacantes
-  T1 (tabla 1): Cuarentena VLAN 90 + SET_FIELD post-auth
-  T2 (tabla 2): ALLOW proactivo por VLAN → servidor (instalado al arrancar)
-  T3 (tabla 3): DENY por sesión MAC+IP con hard_timeout
+  T0 (tabla 0): Portal/control + rutas exactas ida/vuelta
+  T1 (tabla 1): Sesion valida, cuarentena VLAN 90 y VLAN logica
+  T2 (tabla 2): Permisos normales hibridos; proactivos al login y reactivos si expiran
+  T3 (tabla 3): Excepciones por usuario/sesion bajo demanda
+  T4 (tabla 4): Fallback TCP IPv4 wildcard hacia ONOS/M6 + default drop
 
 Flujo M1 ↔ M6 (DOS llamadas, en este orden):
   1. POST /m6/resolver_host  {ip_asignada}
@@ -27,7 +28,7 @@ Flujo M1 ↔ M6 (DOS llamadas, en este orden):
   2. POST /m6/token_rol {codigo_pucp, nombre_rol, vlan_id, ip_asignada,
                           mac, switch_dpid, in_port}
      → Solo se llama DESPUÉS de que M1 confirmó el registro en MySQL.
-     → M6 instala todos los flows (T1 SET_FIELD, T0 return, T0/T3 políticas).
+     → M6 instala sesion, pipeline base y caminos T2 normales de la vida principal.
   Este orden es deliberado: ningún flow se instala para una sesión que no
   esté ya persistida en la base de datos (evita acceso de red "fantasma"
   si el registro en MySQL llega a fallar).
@@ -115,11 +116,32 @@ class Config:
     MYSQL_SECURITY_READS_ENABLED = env_bool.__func__(
         "MYSQL_SECURITY_READS_ENABLED", False
     )
-    POLICY_QUERIES_ENABLED = env_bool.__func__("POLICY_QUERIES_ENABLED", False)
+    POLICY_QUERIES_ENABLED = env_bool.__func__("POLICY_QUERIES_ENABLED", True)
     STARTUP_FLOW_INSTALL_ENABLED = env_bool.__func__(
         "STARTUP_FLOW_INSTALL_ENABLED", False
     )
     PORTAL_SYNC_INTERVAL = int(os.getenv("PORTAL_SYNC_INTERVAL", "0"))
+    REACTIVE_DATA_FLOWS_ENABLED = env_bool.__func__(
+        "REACTIVE_DATA_FLOWS_ENABLED", False
+    )
+    SESSION_EXPIRE_ON_T1_REMOVED = env_bool.__func__(
+        "SESSION_EXPIRE_ON_T1_REMOVED", False
+    )
+    SESSION_IDLE_TIMEOUT = int(os.getenv("SESSION_IDLE_TIMEOUT", "600"))
+    PACKET_IN_DEDUP_WINDOW = float(os.getenv("PACKET_IN_DEDUP_WINDOW", "2"))
+    PACKET_IN_RATE_LIMIT_WINDOW = float(os.getenv(
+        "PACKET_IN_RATE_LIMIT_WINDOW", "10"
+    ))
+    PACKET_IN_RATE_LIMIT_MAX_EVENTS = int(os.getenv(
+        "PACKET_IN_RATE_LIMIT_MAX_EVENTS", "80"
+    ))
+    PACKET_IN_RATE_LIMIT_MAX_PORTS = int(os.getenv(
+        "PACKET_IN_RATE_LIMIT_MAX_PORTS", "30"
+    ))
+    PACKET_IN_RATE_LIMIT_MAX_DESTINATIONS = int(os.getenv(
+        "PACKET_IN_RATE_LIMIT_MAX_DESTINATIONS", "15"
+    ))
+    M1_INTERNAL_URL = os.getenv("M1_INTERNAL_URL", "http://127.0.0.1:8282")
 
     # Resiliencia
     MAX_REINTENTOS = 3
@@ -151,10 +173,14 @@ class Config:
     PRIO_PORTAL_T1  = 100     # T1: portal en cuarentena (tabla 1)
     PRIO_DROP_T1    = 5       # T1: DROP default cuarentena
     PRIO_SESION_T1  = 40000   # T1: SET_FIELD post-auth
-    PRIO_T2_ALLOW   = 100     # T2: ALLOW proactivo por VLAN
+    PRIO_T2_DATA_ALLOW = 110  # T2: ALLOW real con salida exacta
+    PRIO_T3_ALLOW   = 150     # T3: ALLOW excepcional por sesión
     PRIO_T3_DENY    = 200     # T3: DROP por sesión
     PRIO_T0_PORTAL  = 200     # T0: ruta directa portal
+    PRIO_T0_SESSION_CLASSIFIER = 50  # T0: host autenticado → T1
+    PRIO_PIPELINE_MISS = 0     # T2/T3/T4: fallback controlado
     PRIO_T0_USUARIO = 35000   # T0: enforcement por MAC post-auth
+    PRIO_T1_SESSION_GATE = 39900  # T1: flow marcador de sesion idle
     PRIO_T0_ATAQUE  = 5000    # T0: bloqueo atacante (instalado por M4)
     DATA_FLOW_TIMEOUT = int(os.getenv("DATA_FLOW_TIMEOUT", "300"))
 
@@ -314,27 +340,6 @@ class FlowBuilder:
             ]}
         }
 
-    # ── T2: ALLOW proactivo por VLAN (tabla 2) ───────────────────────────────
-
-    def t2_allow_vlan(self, device_id, vlan_id, ip_dst, tcp_port):
-        """T2 prio100 — VLAN_VID + IP_DST + TCP_PORT → OUTPUT NORMAL."""
-        return {
-            "priority":    Config.PRIO_T2_ALLOW,
-            "isPermanent": True,
-            "deviceId":    device_id,
-            "tableId":     2,
-            "selector": {"criteria": [
-                {"type": "VLAN_VID", "vlanId": vlan_id},
-                {"type": "ETH_TYPE", "ethType": "0x0800"},
-                {"type": "IP_PROTO", "protocol": 6},
-                {"type": "IPV4_DST", "ip": f"{ip_dst}/32"},
-                {"type": "TCP_DST",  "tcpPort": tcp_port}
-            ]},
-            "treatment": {"instructions": [
-                {"type": "OUTPUT", "port": "NORMAL"}
-            ]}
-        }
-
     # ── T3: DENY por sesión (tabla 3) ────────────────────────────────────────
 
     def t3_deny_sesion(self, device_id, mac, ip_src, ip_dst,
@@ -378,6 +383,33 @@ class FlowBuilder:
             ]}
         }
 
+    def t1_session_gate(self, device_id, mac, in_port, vlan_nuevo,
+                        session_timeout=600):
+        """
+        T1 marcador de sesion: si expira por idle, M6 puede cerrar la sesion.
+        El enforcement real sigue en T2/T3; este flow solo mantiene viva la
+        sesion cuando trafico autenticado atraviesa el borde.
+        """
+        return {
+            "priority":    Config.PRIO_T1_SESSION_GATE,
+            "isPermanent": False,
+            "timeout":     int(session_timeout),
+            "deviceId":    device_id,
+            "tableId":     1,
+            "selector": {"criteria": [
+                {"type": "IN_PORT",  "port": int(in_port)},
+                {"type": "ETH_SRC",  "mac":  mac},
+                {"type": "ETH_TYPE", "ethType": "0x0800"},
+                {"type": "IP_PROTO", "protocol": 6},
+            ]},
+            "treatment": {"instructions": [
+                {"type": "L2MODIFICATION", "subtype": "VLAN_PUSH"},
+                {"type": "L2MODIFICATION", "subtype": "VLAN_ID",
+                 "vlanId": int(vlan_nuevo)},
+                {"type": "TABLE", "tableId": 2}
+            ]}
+        }
+
     def t0_allow_tcp_path(self, device_id, in_port, src_mac, dst_mac,
                           src_ip, dst_ip, tcp_port, out_port,
                           direction="dst", session_timeout=28800):
@@ -412,24 +444,52 @@ class FlowBuilder:
             ]}
         }
 
-    def tcp_path_table_flow(self, device_id, table_id, in_port, src_mac, dst_mac,
-                            src_ip, dst_ip, tcp_port, out_port=None,
-                            direction="dst", next_table=None,
-                            session_timeout=300, priority=None):
+    def tcp_path_table_flow(self, device_id, table_id, in_port, src_mac=None,
+                            dst_mac=None, src_ip=None, dst_ip=None,
+                            tcp_port=None, out_port=None, direction="dst",
+                            next_table=None, session_timeout=300,
+                            priority=None, set_vlan=None, match_vlan=None,
+                            pop_vlan=False):
         """
         Flow estricto para pipeline multi-tabla.
         - Si next_table existe: valida el match y hace goto a la siguiente tabla.
         - Si out_port existe: entrega al puerto exacto del siguiente salto.
         """
-        tcp_match = (
-            {"type": "TCP_SRC", "tcpPort": int(tcp_port)}
-            if direction == "src"
-            else {"type": "TCP_DST", "tcpPort": int(tcp_port)}
-        )
+        criteria = [{"type": "IN_PORT", "port": int(in_port)}]
+        if match_vlan is not None:
+            criteria.append({"type": "VLAN_VID", "vlanId": int(match_vlan)})
+        if src_mac:
+            criteria.append({"type": "ETH_SRC", "mac": src_mac})
+        if dst_mac:
+            criteria.append({"type": "ETH_DST", "mac": dst_mac})
+        criteria.extend([
+            {"type": "ETH_TYPE", "ethType": "0x0800"},
+            {"type": "IP_PROTO", "protocol": 6},
+        ])
+        if src_ip:
+            criteria.append({"type": "IPV4_SRC", "ip": f"{src_ip}/32"})
+        if dst_ip:
+            criteria.append({"type": "IPV4_DST", "ip": f"{dst_ip}/32"})
+        if tcp_port is not None:
+            criteria.append(
+                {"type": "TCP_SRC", "tcpPort": int(tcp_port)}
+                if direction == "src"
+                else {"type": "TCP_DST", "tcpPort": int(tcp_port)}
+            )
+
         instructions = []
+        if set_vlan is not None:
+            instructions.extend([
+                {"type": "L2MODIFICATION", "subtype": "VLAN_PUSH"},
+                {"type": "L2MODIFICATION", "subtype": "VLAN_ID",
+                 "vlanId": int(set_vlan)},
+            ])
         if next_table is not None:
             instructions.append({"type": "TABLE", "tableId": int(next_table)})
         elif out_port is not None:
+            if pop_vlan:
+                instructions.append({"type": "L2MODIFICATION",
+                                     "subtype": "VLAN_POP"})
             instructions.append({"type": "OUTPUT", "port": int(out_port)})
 
         return {
@@ -438,16 +498,7 @@ class FlowBuilder:
             "timeout":     int(session_timeout),
             "deviceId":    device_id,
             "tableId":     int(table_id),
-            "selector": {"criteria": [
-                {"type": "IN_PORT",  "port": int(in_port)},
-                {"type": "ETH_SRC",  "mac":  src_mac},
-                {"type": "ETH_DST",  "mac":  dst_mac},
-                {"type": "ETH_TYPE", "ethType": "0x0800"},
-                {"type": "IP_PROTO", "protocol": 6},
-                {"type": "IPV4_SRC", "ip": f"{src_ip}/32"},
-                {"type": "IPV4_DST", "ip": f"{dst_ip}/32"},
-                tcp_match
-            ]},
+            "selector": {"criteria": criteria},
             "treatment": {"instructions": instructions}
         }
 
@@ -468,7 +519,57 @@ class FlowBuilder:
             "treatment": {"clearDeferred": True, "instructions": []}
         }
 
-   
+    def t0_session_classifier(self, device_id, mac, in_port,
+                              session_timeout=600):
+        """T0 prio50 — TCP autenticado del host → T1."""
+        return {
+            "priority":    Config.PRIO_T0_SESSION_CLASSIFIER,
+            "isPermanent": False,
+            "timeout":     int(session_timeout),
+            "deviceId":    device_id,
+            "tableId":     0,
+            "selector": {"criteria": [
+                {"type": "IN_PORT",  "port": int(in_port)},
+                {"type": "ETH_SRC",  "mac":  mac},
+                {"type": "ETH_TYPE", "ethType": "0x0800"},
+                {"type": "IP_PROTO", "protocol": 6},
+            ]},
+            "treatment": {"instructions": [
+                {"type": "TABLE", "tableId": 1}
+            ]}
+        }
+
+    def t2_miss_goto_t3(self, device_id):
+        """T2 miss — permisos normales no resolvieron → T3."""
+        return self._pipeline_goto(device_id, 2, 3)
+
+    def t3_miss_goto_t4(self, device_id):
+        """T3 miss — excepciones no resolvieron → T4."""
+        return self._pipeline_goto(device_id, 3, 4)
+
+    def t4_default_drop(self, device_id):
+        """T4 default — todo fallback no reconocido se descarta."""
+        return {
+            "priority":    Config.PRIO_PIPELINE_MISS,
+            "isPermanent": True,
+            "deviceId":    device_id,
+            "tableId":     4,
+            "selector":    {"criteria": []},
+            "treatment":   {"clearDeferred": True, "instructions": []}
+        }
+
+    def _pipeline_goto(self, device_id, table_id, next_table):
+        return {
+            "priority":    Config.PRIO_PIPELINE_MISS,
+            "isPermanent": True,
+            "deviceId":    device_id,
+            "tableId":     int(table_id),
+            "selector":    {"criteria": []},
+            "treatment":   {"instructions": [
+                {"type": "TABLE", "tableId": int(next_table)}
+            ]}
+        }
+
 
     # ── T0: Bloqueo atacante (tabla 0) ───────────────────────────────────────
 
@@ -631,18 +732,35 @@ class PolicyEngine:
         allow_map = {}
         for p in m2_permisos:
             recurso = p.get("recurso", {})
-            ip_raw  = recurso.get("ip_dst", "")
+            tabla = str(p.get("tabla") or "T2").upper()
+            if tabla not in ("T2", "T3"):
+                tabla = "T2"
+            expires_at = p.get("expires_at")
+            ip_raw  = (
+                recurso.get("ip_dst")
+                or recurso.get("ip_srv")
+                or recurso.get("ip_servidor")
+                or ""
+            )
             puerto  = recurso.get("puerto")
             if not ip_raw or puerto is None:
                 continue
             ip_dst = self._normalizar_ip(ip_raw)
-            allow_map.setdefault(ip_dst, set()).add(int(puerto))
+            allow_map.setdefault((ip_dst, tabla, expires_at), set()).add(int(puerto))
 
-        permisos = [{"ip_dst": ip, "puertos": sorted(ps)}
-                    for ip, ps in allow_map.items()]
+        permisos = [
+            {
+                "ip_dst": ip,
+                "puertos": sorted(ps),
+                "tabla": tabla,
+                "expires_at": expires_at,
+            }
+            for (ip, tabla, expires_at), ps in allow_map.items()
+        ]
 
         all_servidores  = {Config.SERVER_CURSOS, Config.SERVER_NOTAS}
-        denied_ips = all_servidores - set(allow_map.keys())
+        allowed_ips = {ip for ip, _, _ in allow_map.keys()}
+        denied_ips = all_servidores - allowed_ips
         denegaciones = [{"ip_dst": ip, "puertos": [80, 443]}
                         for ip in sorted(denied_ips)]
 
@@ -816,6 +934,28 @@ class ONOSClient:
             return False
         except Exception as e:
             print(f"  [ONOS] Error al eliminar {flow_id}: {e}")
+            return False
+
+    def flow_exists(self, device_id, flow_id):
+        """ONOS is the source of truth for reusable/cacheable flows."""
+        if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
+            return True
+        if not flow_id:
+            return False
+        endpoint = f"{self.url}/onos/v1/flows/{device_id}"
+        try:
+            resp = requests.get(endpoint, auth=self.auth, timeout=3)
+            if resp.status_code == 200:
+                flow_id = str(flow_id)
+                for flow in resp.json().get("flows", []):
+                    if str(flow.get("id")) == flow_id:
+                        return flow.get("state") == "ADDED"
+                return False
+            print(f"  [ONOS] No se pudo validar flow {flow_id}: "
+                  f"HTTP {resp.status_code}")
+            return False
+        except Exception as e:
+            print(f"  [ONOS] Error validando flow {flow_id}: {e}")
             return False
 
     def get_host_by_ip(self, ip_asignada):
@@ -1010,8 +1150,36 @@ class M6Translator:
         self.flows_por_sesion = {}  # {mac: [(device_id, flow_id), ...]}
         self.flows_portal = {}      # {mac: [(device_id, flow_id), ...]}
         self.portal_ips = {}        # {mac: ip_asignada}
+        self.flows_t0_shared = {}   # {policy_key: (device_id, flow_id, expires_at)}
+        self.session_gates = {}     # {mac: (device_id, flow_id, expires_at)}
+        self.session_classifiers = {}  # {mac: (device_id, flow_id, expires_at)}
+        self.pipeline_fallback_flows = {}  # {device_id: [(device_id, flow_id), ...]}
         self.mitigaciones = {}
         self._security_windows = defaultdict(deque)
+        self._packet_in_seen = {}
+
+    def _flow_debug(self, flow_entry):
+        selector = flow_entry.get("selector", {}).get("criteria", [])
+        treatment = flow_entry.get("treatment", {}).get("instructions", [])
+        return {
+            "device": flow_entry.get("deviceId"),
+            "table": flow_entry.get("tableId"),
+            "prio": flow_entry.get("priority"),
+            "timeout": flow_entry.get("timeout"),
+            "selector": selector,
+            "treatment": treatment,
+        }
+
+    def _trace_flow(self, label, flow_entry, flow_id=None, reused=False):
+        detail = self._flow_debug(flow_entry)
+        estado = "REUSED" if reused else ("ADDED" if flow_id else "FAILED")
+        print(
+            f"    [TRACE-FLOW] {label} {estado} id={flow_id} "
+            f"dev={detail['device']} T{detail['table']} "
+            f"prio={detail['prio']} idle={detail['timeout']}"
+        )
+        print(f"      selector={detail['selector']}")
+        print(f"      treatment={detail['treatment']}")
 
     def _instalar_y_cachear(self, device_id, flow_entry, mac=None):
         """Instala un flow y lo registra en el cache de sesión si se provee mac."""
@@ -1023,18 +1191,220 @@ class M6Translator:
                 self.flows_por_sesion[mac].append((device_id, fid))
         return fid
 
+    def _instalar_t0_compartido(self, key, device_id, flow_entry, ttl):
+        """
+        Instala o reutiliza un flow T0 compartido para troncales/servidor.
+        No se borra en logout: expira por idle timeout y puede servir a otros
+        usuarios que compartan el mismo tramo y recurso.
+        """
+        now = time.time()
+        with self._lock:
+            cached = self.flows_t0_shared.get(key)
+            if cached and self.onos.flow_exists(cached[0], cached[1]):
+                self.flows_t0_shared[key] = (
+                    cached[0], cached[1], now + int(ttl)
+                )
+                return cached[1], True
+            if cached:
+                self.flows_t0_shared.pop(key, None)
+
+        if cached:
+            self.onos.eliminar_flow(cached[0], cached[1])
+
+        fid = self.onos.instalar_flow(device_id, flow_entry)
+        if fid:
+            with self._lock:
+                self.flows_t0_shared[key] = (device_id, fid, now + int(ttl))
+        return fid, False
+
+    def _instalar_session_gate(self, mac, switch_dpid, in_port, vlan_id):
+        """Instala el marcador T1 que representa sesion viva por idle timeout."""
+        mac_key = mac.lower()
+        now = time.time()
+        with self._lock:
+            cached = self.session_gates.get(mac_key)
+            if cached and self.onos.flow_exists(cached[0], cached[1]):
+                self.session_gates[mac_key] = (
+                    cached[0],
+                    cached[1],
+                    now + Config.SESSION_IDLE_TIMEOUT,
+                )
+                return cached[1]
+            if cached:
+                self.session_gates.pop(mac_key, None)
+        flow = self.builder.t1_session_gate(
+            switch_dpid,
+            mac,
+            in_port,
+            vlan_id,
+            session_timeout=Config.SESSION_IDLE_TIMEOUT,
+        )
+        fid = self._instalar_y_cachear(switch_dpid, flow, mac)
+        if fid:
+            with self._lock:
+                self.session_gates[mac_key] = (
+                    switch_dpid,
+                    fid,
+                    now + Config.SESSION_IDLE_TIMEOUT,
+                )
+        return fid
+
+    def _instalar_clasificador_sesion_t0(self, mac, switch_dpid, in_port):
+        """Instala la entrada T0 que permite llegar al pipeline T1→T4."""
+        mac_key = mac.lower()
+        now = time.time()
+        with self._lock:
+            cached = self.session_classifiers.get(mac_key)
+            if cached and self.onos.flow_exists(cached[0], cached[1]):
+                self.session_classifiers[mac_key] = (
+                    cached[0],
+                    cached[1],
+                    now + Config.SESSION_IDLE_TIMEOUT,
+                )
+                return cached[1]
+            if cached:
+                self.session_classifiers.pop(mac_key, None)
+        flow = self.builder.t0_session_classifier(
+            switch_dpid,
+            mac,
+            in_port,
+            session_timeout=Config.SESSION_IDLE_TIMEOUT,
+        )
+        fid = self._instalar_y_cachear(switch_dpid, flow, mac)
+        if fid:
+            with self._lock:
+                self.session_classifiers[mac_key] = (
+                    switch_dpid,
+                    fid,
+                    now + Config.SESSION_IDLE_TIMEOUT,
+                )
+        return fid
+
+    def _asegurar_pipeline_fallback_en_borde(self, switch_dpid):
+        """Instala T2→T3→T4 una sola vez por switch de acceso conocido."""
+        with self._lock:
+            cached = list(self.pipeline_fallback_flows.get(switch_dpid, []))
+        if self._flows_existen_en_onos(cached):
+            return 0
+        if cached:
+            for device_id, flow_id in cached:
+                self.onos.eliminar_flow(device_id, flow_id)
+            with self._lock:
+                self.pipeline_fallback_flows.pop(switch_dpid, None)
+        with self._lock:
+            if self.pipeline_fallback_flows.get(switch_dpid):
+                return 0
+        flows = [
+            self.builder.t2_miss_goto_t3(switch_dpid),
+            self.builder.t3_miss_goto_t4(switch_dpid),
+            self.builder.t4_default_drop(switch_dpid),
+        ]
+        instalados = 0
+        flow_ids = []
+        for flow in flows:
+            fid = self.onos.instalar_flow(switch_dpid, flow)
+            if fid:
+                instalados += 1
+                flow_ids.append((switch_dpid, fid))
+        if instalados == len(flows):
+            with self._lock:
+                self.pipeline_fallback_flows[switch_dpid] = flow_ids
+        return instalados
+
+    def _es_packet_in_duplicado(self, data):
+        """Deduplicacion corta para evitar tormentas de Packet-In repetidos."""
+        window = Config.PACKET_IN_DEDUP_WINDOW
+        if window <= 0:
+            return False
+        key = (
+            str(data.get("src_mac", "")).lower(),
+            data.get("src_ip"),
+            data.get("dst_ip"),
+            int(data.get("dst_port") or 0),
+            data.get("switch_dpid"),
+            int(data.get("in_port") or 0),
+        )
+        now = time.time()
+        with self._lock:
+            last = self._packet_in_seen.get(key)
+            if last and now - last < window:
+                return True
+            self._packet_in_seen[key] = now
+            stale = [
+                item_key
+                for item_key, ts in self._packet_in_seen.items()
+                if now - ts > max(window * 10, 30)
+            ]
+            for item_key in stale:
+                self._packet_in_seen.pop(item_key, None)
+        return False
+
+    def _packet_in_excede_rate_limit(self, data):
+        """
+        Limita bursts antes de consultar politicas. Esto evita que un scan TCP
+        convierta T4 wildcard en muchas consultas OPA/MySQL por segundo.
+        """
+        window = Config.PACKET_IN_RATE_LIMIT_WINDOW
+        if window <= 0:
+            return False, {}
+        now = time.time()
+        key = (
+            data.get("src_mac"),
+            data.get("src_ip"),
+            data.get("switch_dpid"),
+            data.get("in_port"),
+        )
+        bucket = self._security_windows[key]
+        bucket.append((now, data.get("dst_ip"), data.get("dst_port")))
+        while bucket and now - bucket[0][0] > window:
+            bucket.popleft()
+
+        destinations = {item[1] for item in bucket if item[1]}
+        ports = {item[2] for item in bucket if item[2] is not None}
+        exceeded = (
+            len(bucket) >= Config.PACKET_IN_RATE_LIMIT_MAX_EVENTS
+            or len(ports) >= Config.PACKET_IN_RATE_LIMIT_MAX_PORTS
+            or len(destinations) >= Config.PACKET_IN_RATE_LIMIT_MAX_DESTINATIONS
+        )
+        return exceeded, {
+            "events": len(bucket),
+            "unique_destinations": len(destinations),
+            "unique_ports": len(ports),
+            "window_seconds": window,
+        }
+
+    def _ttl_permiso(self, session_timeout, expires_at=None):
+        """Calcula TTL seguro para flows de datos y capea por expiración OPA."""
+        ttl = min(int(session_timeout or Config.DATA_FLOW_TIMEOUT),
+                  Config.DATA_FLOW_TIMEOUT)
+        if not expires_at:
+            return ttl
+        try:
+            exp = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+            remaining = int((exp - datetime.now(timezone.utc)).total_seconds())
+            if remaining <= 0:
+                return 0
+            return max(1, min(ttl, remaining))
+        except Exception:
+            return ttl
+
     def _instalar_camino_tcp(self, mac_sesion, src_host, dst_host,
-                             src_ip, dst_ip, tcp_port, session_timeout):
+                             src_ip, dst_ip, tcp_port, vlan_id,
+                             session_timeout, target_table="T2",
+                             expires_at=None):
         """
         Instala ida y retorno para un permiso TCP usando rutas explicitas.
         Pipeline post-login:
-          T0 clasifica el flujo exacto y salta a T1.
-          T1 valida la sesion exacta y salta a T2.
-          T2 entrega al puerto exacto del siguiente salto.
+          Borde usuario: T0 clasifica, T1 marca VLAN logica y T2/T3 autoriza.
+          Troncales/servidor: T0 compartido por recurso reenvia al puerto exacto.
+          Retorno: T0 compartido hasta el borde; entrega final por sesion.
         No usa OUTPUT NORMAL.
         """
-        data_timeout = min(int(session_timeout or Config.DATA_FLOW_TIMEOUT),
-                           Config.DATA_FLOW_TIMEOUT)
+        target_table_id = 3 if str(target_table).upper() == "T3" else 2
+        data_timeout = self._ttl_permiso(session_timeout, expires_at)
+        if data_timeout <= 0:
+            print(f"    ! {dst_ip}:{tcp_port} — permiso expirado; se omite")
+            return 0
         ida = self.onos.calcular_pasos(
             src_host["switch_dpid"], src_host["in_port"],
             dst_host["switch_dpid"], dst_host["in_port"]
@@ -1046,9 +1416,41 @@ class M6Translator:
         if not ida or not retorno:
             return 0
 
+        print(
+            f"  [TRACE-PATH] {src_ip}/{src_host['mac']} -> "
+            f"{dst_ip}/{dst_host['mac']} tcp={tcp_port} "
+            f"tabla={target_table} vlan={vlan_id} ttl={data_timeout}"
+        )
+        print(f"    ida={ida}")
+        print(f"    retorno={retorno}")
+
         instalados = 0
-        for device_id, in_port, out_port in ida:
-            for flow in (
+        for idx, (device_id, in_port, out_port) in enumerate(ida):
+            es_borde_usuario = idx == 0
+            if not es_borde_usuario:
+                flow = self.builder.tcp_path_table_flow(
+                    device_id, 0, in_port,
+                    dst_mac=dst_host["mac"],
+                    dst_ip=dst_ip,
+                    tcp_port=tcp_port,
+                    out_port=out_port,
+                    direction="dst",
+                    session_timeout=data_timeout,
+                    priority=Config.PRIO_T0_USUARIO,
+                )
+                key = (
+                    "fwd-shared", device_id, int(in_port), dst_host["mac"],
+                    dst_ip, int(tcp_port), int(out_port)
+                )
+                fid, reused = self._instalar_t0_compartido(
+                    key, device_id, flow, data_timeout
+                )
+                self._trace_flow("IDA-TRONCAL-T0", flow, fid, reused)
+                if fid:
+                    instalados += 1
+                continue
+
+            edge_flows = [
                 self.builder.tcp_path_table_flow(
                     device_id, 0, in_port,
                     src_host["mac"], dst_host["mac"],
@@ -1057,63 +1459,83 @@ class M6Translator:
                     next_table=1,
                     session_timeout=data_timeout,
                     priority=Config.PRIO_T0_USUARIO,
-                ),
-                self.builder.tcp_path_table_flow(
-                    device_id, 1, in_port,
-                    src_host["mac"], dst_host["mac"],
-                    src_ip, dst_ip, tcp_port,
-                    direction="dst",
-                    next_table=2,
-                    session_timeout=data_timeout,
-                    priority=Config.PRIO_SESION_T1,
-                ),
-                self.builder.tcp_path_table_flow(
-                    device_id, 2, in_port,
-                    src_host["mac"], dst_host["mac"],
-                    src_ip, dst_ip, tcp_port,
-                    out_port=out_port,
-                    direction="dst",
-                    session_timeout=data_timeout,
-                    priority=Config.PRIO_T2_ALLOW,
-                ),
-            ):
+                )
+            ]
+            if target_table_id == 3:
+                edge_flows.append(
+                    self.builder.tcp_path_table_flow(
+                        device_id, 1, in_port,
+                        src_host["mac"], dst_host["mac"],
+                        src_ip, dst_ip, tcp_port,
+                        direction="dst",
+                        next_table=target_table_id,
+                        session_timeout=data_timeout,
+                        priority=Config.PRIO_SESION_T1,
+                        set_vlan=vlan_id,
+                    )
+                )
+            for flow in edge_flows:
                 fid = self._instalar_y_cachear(device_id, flow, mac_sesion)
+                self._trace_flow("IDA-BORDE-T0T1", flow, fid)
+                if fid:
+                    instalados += 1
+            final_flow = self.builder.tcp_path_table_flow(
+                device_id, target_table_id, in_port,
+                src_mac=(
+                    src_host["mac"] if target_table_id == 3 else None
+                ),
+                dst_mac=dst_host["mac"],
+                dst_ip=dst_ip,
+                tcp_port=tcp_port,
+                out_port=out_port,
+                direction="dst",
+                session_timeout=data_timeout,
+                priority=(
+                    Config.PRIO_T3_ALLOW
+                    if target_table_id == 3 else Config.PRIO_T2_DATA_ALLOW
+                ),
+                match_vlan=vlan_id,
+                pop_vlan=True,
+            )
+            if target_table_id == 2:
+                fid = self._instalar_y_cachear(device_id, final_flow, mac_sesion)
+                self._trace_flow("IDA-BORDE-T2", final_flow, fid)
+                if fid:
+                    instalados += 1
+            else:
+                fid = self._instalar_y_cachear(device_id, final_flow, mac_sesion)
+                self._trace_flow("IDA-BORDE-T3", final_flow, fid)
                 if fid:
                     instalados += 1
 
-        for device_id, in_port, out_port in retorno:
-            for flow in (
-                self.builder.tcp_path_table_flow(
-                    device_id, 0, in_port,
-                    dst_host["mac"], src_host["mac"],
-                    dst_ip, src_ip, tcp_port,
-                    direction="src",
-                    next_table=1,
-                    session_timeout=data_timeout,
-                    priority=Config.PRIO_T0_USUARIO,
-                ),
-                self.builder.tcp_path_table_flow(
-                    device_id, 1, in_port,
-                    dst_host["mac"], src_host["mac"],
-                    dst_ip, src_ip, tcp_port,
-                    direction="src",
-                    next_table=2,
-                    session_timeout=data_timeout,
-                    priority=Config.PRIO_SESION_T1,
-                ),
-                self.builder.tcp_path_table_flow(
-                    device_id, 2, in_port,
-                    dst_host["mac"], src_host["mac"],
-                    dst_ip, src_ip, tcp_port,
-                    out_port=out_port,
-                    direction="src",
-                    session_timeout=data_timeout,
-                    priority=Config.PRIO_T2_ALLOW,
-                ),
-            ):
+        for idx, (device_id, in_port, out_port) in enumerate(retorno):
+            es_borde_usuario_retorno = idx == len(retorno) - 1
+            flow = self.builder.tcp_path_table_flow(
+                device_id, 0, in_port,
+                src_mac=dst_host["mac"],
+                src_ip=dst_ip,
+                dst_mac=src_host["mac"] if es_borde_usuario_retorno else None,
+                dst_ip=src_ip if es_borde_usuario_retorno else None,
+                tcp_port=tcp_port,
+                out_port=out_port,
+                direction="src",
+                session_timeout=data_timeout,
+                priority=Config.PRIO_T0_USUARIO,
+            )
+            if es_borde_usuario_retorno:
                 fid = self._instalar_y_cachear(device_id, flow, mac_sesion)
-                if fid:
-                    instalados += 1
+                self._trace_flow("RET-BORDE-T0", flow, fid)
+            else:
+                key = (
+                    "ret-shared", device_id, int(in_port), dst_host["mac"],
+                    dst_ip, int(tcp_port), int(out_port)
+                )
+                fid, reused = self._instalar_t0_compartido(
+                    key, device_id, flow, data_timeout
+                )
+                self._trace_flow("RET-TRONCAL-T0", flow, fid, reused)
+            if fid:
+                instalados += 1
 
         return instalados
 
@@ -1180,7 +1602,13 @@ class M6Translator:
                 self.portal_ips[mac] = ip_host
         return len(instalados)
 
-    def sincronizar_portal_cuarentena(self):
+    def _flows_existen_en_onos(self, flows):
+        return bool(flows) and all(
+            self.onos.flow_exists(device_id, flow_id)
+            for device_id, flow_id in flows
+        )
+
+    def sincronizar_portal_cuarentena(self, force=False):
         """
         Lee hosts ONOS y prepara acceso minimo al portal para clientes de datos.
         No abre recursos, no usa NORMAL y excluye servidores/portal/DHCP.
@@ -1213,17 +1641,19 @@ class M6Translator:
                 vistos.add(key)
                 mac_key = mac.lower()
                 with self._lock:
-                    ya_instalado = (
-                        self.portal_ips.get(mac_key) == ip
-                        and bool(self.flows_portal.get(mac_key))
-                    )
+                    cached_flows = list(self.flows_portal.get(mac_key, []))
+                    misma_ip = self.portal_ips.get(mac_key) == ip
+                ya_instalado = (
+                    not force and misma_ip
+                    and self._flows_existen_en_onos(cached_flows)
+                )
                 host = {
                     "mac": mac,
                     "switch_dpid": locs[0]["elementId"],
                     "in_port": int(locs[0]["port"]),
                 }
                 n = (
-                    len(self.flows_portal.get(mac_key, []))
+                    len(cached_flows)
                     if ya_instalado
                     else self._instalar_camino_portal(host, portal, ip)
                 )
@@ -1329,8 +1759,8 @@ class M6Translator:
                 not permission.get("puertos")
                 or dst_port in permission["puertos"]
             ):
-                return True, policies
-        return False, policies
+                return True, policies, permission
+        return False, policies, None
 
     def _registrar_evento_denegado(self, data, event_type="policy_denial"):
         now = time.time()
@@ -1407,6 +1837,21 @@ class M6Translator:
         missing = [field for field in required if data.get(field) is None]
         if missing:
             return {"ok": False, "error": f"faltan campos: {', '.join(missing)}"}
+        print(
+            "\n[M6][PACKET-IN] "
+            f"{data.get('src_ip')} {data.get('src_mac')} -> "
+            f"{data.get('dst_ip')} {data.get('dst_mac', '?')}:"
+            f"{data.get('dst_port')} "
+            f"sw={data.get('switch_dpid')} in_port={data.get('in_port')}"
+        )
+        if self._es_packet_in_duplicado(data):
+            print("[M6][PACKET-IN] duplicado dentro de ventana; se difiere")
+            return {
+                "ok": True,
+                "decision": "DEFER",
+                "install_flow": False,
+                "reason": "duplicate_packet_in",
+            }
 
         session = self._buscar_sesion(
             data["src_ip"],
@@ -1416,6 +1861,7 @@ class M6Translator:
             data,
         )
         if not session:
+            print("[M6][PACKET-IN] DENY: no hay sesion activa/binding valido")
             event = self._registrar_evento_denegado(
                 data,
                 event_type="invalid_ip_mac_binding",
@@ -1433,8 +1879,31 @@ class M6Translator:
             "codigo_pucp": session.get("codigo_pucp"),
             "nombre_rol": session.get("nombre_rol"),
         }
-        allowed, _ = self._evaluar_acceso_reactivo(session, merged)
+        burst, burst_meta = self._packet_in_excede_rate_limit(merged)
+        if burst:
+            print(
+                "[M6][PACKET-IN] BURST rate-limited antes de politica "
+                f"usuario={session.get('codigo_pucp')} meta={burst_meta}"
+            )
+            event = self._registrar_evento_denegado(
+                merged,
+                event_type="policy_denial_burst",
+            )
+            event["metadata"].update(burst_meta)
+            return {
+                "ok": True,
+                "decision": "DEFER",
+                "install_flow": False,
+                "reason": "packet_in_rate_limited",
+                "security_event": event,
+            }
+
+        allowed, _, permission = self._evaluar_acceso_reactivo(session, merged)
         if not allowed:
+            print(
+                f"[M6][PACKET-IN] DENY por politica usuario="
+                f"{session.get('codigo_pucp')} rol={session.get('nombre_rol')}"
+            )
             event = self._registrar_evento_denegado(merged)
             return {
                 "ok": True,
@@ -1444,22 +1913,60 @@ class M6Translator:
                 "security_event": event,
             }
 
-        flow = self.builder.t0_allow_usuario(
-            data["switch_dpid"],
-            data["src_mac"],
-            data["dst_ip"],
-            out_port=data.get("out_port", "NORMAL"),
-            session_timeout=int(data.get("idle_timeout", 300)),
+        vlan_id = int(
+            data.get("vlan_id")
+            or session.get("vlan_id")
+            or Config.VLANS_POR_ROL.get(session.get("nombre_rol"), 0)
         )
-        flow_id = self._instalar_y_cachear(
-            data["switch_dpid"],
-            flow,
-            data["src_mac"],
+        dst_ip = Config.get_ip_mapping_m2().get(data.get("dst_ip"), data.get("dst_ip"))
+        dst_port = int(data["dst_port"])
+        dst_host = self.onos.get_host_by_ip(dst_ip)
+        if not dst_host:
+            print(f"[M6][PACKET-IN] DEFER: dst_host no aprendido {dst_ip}")
+            return {
+                "ok": True,
+                "decision": "DEFER",
+                "install_flow": False,
+                "reason": "dst_host_not_learned",
+                "dst_ip": dst_ip,
+            }
+        print(
+            f"[M6][PACKET-IN] ALLOW usuario={session.get('codigo_pucp')} "
+            f"rol={session.get('nombre_rol')} vlan={vlan_id} "
+            f"tabla={str(permission.get('tabla') or 'T2').upper()} "
+            f"permiso={permission} dst_host={dst_host}"
         )
+
+        src_host = {
+            "mac": data["src_mac"],
+            "switch_dpid": data["switch_dpid"],
+            "in_port": int(data["in_port"]),
+        }
+        self._instalar_session_gate(
+            data["src_mac"],
+            data["switch_dpid"],
+            int(data["in_port"]),
+            vlan_id,
+        )
+        installed = self._instalar_camino_tcp(
+            data["src_mac"],
+            src_host,
+            dst_host,
+            data["src_ip"],
+            dst_ip,
+            dst_port,
+            vlan_id,
+            int(data.get("idle_timeout", Config.DATA_FLOW_TIMEOUT)),
+            target_table=str(permission.get("tabla") or "T2").upper(),
+            expires_at=permission.get("expires_at"),
+        )
+        flow = None
+        flow_id = None
         return {
             "ok": True,
             "decision": "ALLOW",
             "install_flow": True,
+            "flows_installed": installed,
             "flow_id": flow_id,
             "flow": flow,
             "status": (
@@ -1468,6 +1975,105 @@ class M6Translator:
                 else "SIMULATED"
             ),
         }
+
+    def _buscar_sesion_db_por_host(self, mac, ip=None, switch_dpid=None, in_port=None):
+        if not MYSQL_OK:
+            return None
+        try:
+            filtros = ["LOWER(s.mac_address)=LOWER(%s)", "s.estado='ACTIVA'"]
+            params = [mac]
+            if ip:
+                filtros.append("s.ip_asignada=%s")
+                params.append(ip)
+            if switch_dpid:
+                filtros.append("s.switch_dpid=%s")
+                params.append(switch_dpid)
+            if in_port is not None:
+                filtros.append("s.in_port=%s")
+                params.append(int(in_port))
+            conn = mysql.connector.connect(
+                host=Config.MYSQL_HOST,
+                user=Config.MYSQL_USER,
+                password=Config.MYSQL_PASS,
+                database=Config.MYSQL_DB,
+                connection_timeout=3,
+            )
+            cur = conn.cursor(dictionary=True)
+            cur.execute(
+                f"""
+                SELECT s.*, u.codigo_pucp
+                FROM sesiones_activas s
+                LEFT JOIN usuarios u ON u.id_usuario=s.id_usuario
+                WHERE {' AND '.join(filtros)}
+                ORDER BY s.login_timestamp DESC
+                LIMIT 1
+                """,
+                tuple(params),
+            )
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            return row
+        except Exception as exc:
+            print(f"[M6] Error buscando sesion para expiracion: {exc}")
+            return None
+
+    def procesar_flow_expired(self, data):
+        mac = (data.get("mac") or data.get("src_mac") or "").lower()
+        if not mac:
+            return {"ok": False, "error": "falta mac"}
+        table_id = int(data.get("tableId", data.get("table_id", 1)))
+        priority = int(data.get("priority", 0))
+        if table_id != 1:
+            return {"ok": True, "ignored": True, "reason": "not_table_1"}
+        if priority and priority != Config.PRIO_T1_SESSION_GATE:
+            return {"ok": True, "ignored": True, "reason": "not_session_gate"}
+
+        result = {
+            "ok": True,
+            "mac": mac,
+            "session_found": False,
+            "expired": False,
+            "status": "DRY_RUN",
+        }
+        if not Config.SESSION_EXPIRE_ON_T1_REMOVED:
+            return result
+
+        session = self._buscar_sesion_db_por_host(
+            mac,
+            ip=data.get("ip") or data.get("src_ip"),
+            switch_dpid=data.get("switch_dpid") or data.get("deviceId"),
+            in_port=data.get("in_port"),
+        )
+        result["session_found"] = bool(session)
+        if not session:
+            self.cerrar_sesion(mac)
+            result["status"] = "NO_ACTIVE_SESSION"
+            return result
+
+        try:
+            resp = requests.post(
+                f"{Config.M1_INTERNAL_URL}/auth/session/expire",
+                json={
+                    "mac": mac,
+                    "motivo": "EXPIRACION",
+                    "source": "onos_flow_removed",
+                },
+                headers={"X-Security-Token": Config.SECURITY_TOKEN},
+                timeout=5,
+            )
+            result["m1_status_code"] = resp.status_code
+            result["m1_response"] = resp.json() if resp.text else {}
+            if resp.status_code in (200, 404):
+                self.cerrar_sesion(mac)
+                result["expired"] = resp.status_code == 200
+                result["status"] = "EXECUTED"
+            else:
+                result["status"] = "M1_ERROR"
+        except Exception as exc:
+            result["status"] = "M1_UNREACHABLE"
+            result["error"] = str(exc)
+        return result
 
     # ── Arranque ──────────────────────────────────────────────────────────────
 
@@ -1562,26 +2168,12 @@ class M6Translator:
             else:
                 print(f"    ✓ {nombre}")
 
-        # ── T2: ALLOW proactivo por VLAN en switches de ACCESO ───────────────
-        POLITICAS_T2 = [
-            (210, SRV_CURSOS, "Est.Telecom → srv1 cursos"),
-            (220, SRV_NOTAS,  "Est.Informatica → srv2 notas"),
-            (230, SRV_CURSOS, "Est.Electronica → srv1 cursos"),
-            (300, SRV_CURSOS, "Docente → srv1 cursos"),
-            (300, SRV_NOTAS,  "Docente → srv2 notas"),
-            (400, SRV_CURSOS, "Admin_TI → srv1 cursos"),
-            (400, SRV_NOTAS,  "Admin_TI → srv2 notas"),
-        ]
-        print(f"\n  [T2] Políticas VLAN proactivas (tabla 2):")
+        # ── T2/T3/T4: fallback reactivo controlado en switches de ACCESO ──────
+        print(f"\n  [T2-T4] Pipeline fallback reactivo (acceso):")
         for device_id in access_switches:
             nombre = Config.SWITCH_NOMBRES.get(device_id, device_id[-4:])
-            for vlan, ip_dst, _ in POLITICAS_T2:
-                for tcp_port in [80, 443]:
-                    self.onos.instalar_flow(
-                        device_id,
-                        self.builder.t2_allow_vlan(device_id, vlan, ip_dst, tcp_port)
-                    )
-            print(f"    ✓ {nombre} ({len(POLITICAS_T2)} políticas × 2 puertos TCP)")
+            instalados = self._asegurar_pipeline_fallback_en_borde(device_id)
+            print(f"    ✓ {nombre} base_flows={instalados}")
 
         print(f"\n[M6] {SEP}")
         print("[M6]  Arranque completado")
@@ -1625,27 +2217,7 @@ class M6Translator:
               f"vlan={vlan_id}  ip={ip_asignada}")
         print(f"  host: mac={mac}  switch={nombre_sw}  puerto={in_port}")
 
-        # 1. T1 SET_FIELD: VLAN 90 → vlan_id del rol (tabla 1, per-sesión)
-        print(f"  [T1] SET_FIELD VLAN {Config.VLAN_CUARENTENA}→{vlan_id}...")
-        self._instalar_y_cachear(
-            switch_dpid,
-            self.builder.set_vlan_post_auth(
-                switch_dpid, mac, in_port, vlan_id, session_timeout
-            ),
-            mac
-        )
-
-        # T0 return flow: respuestas de servidores → host (per-sesión)
-        print(f"  [T0] Return flow → puerto {in_port}...")
-        self._instalar_y_cachear(
-            switch_dpid,
-            self.builder.t0_return_flow(
-                switch_dpid, mac, in_port, session_timeout
-            ),
-            mac
-        )
-
-        # 2. Obtener políticas (OPA → MySQL → hardcoded)
+        # 1. Obtener políticas (OPA → MySQL → hardcoded)
         payload_opa = {
             "input": {
                 "codigo_pucp": codigo_pucp,
@@ -1658,7 +2230,7 @@ class M6Translator:
         }
         politicas = self.policies.get_policies(payload_opa)
 
-        # 3. Instalar flows de política
+        # 2. Instalar flows de política
         n_allow, n_deny = 0, 0
         print(f"  Instalando enforcement...")
         host_origen = {
@@ -1666,9 +2238,100 @@ class M6Translator:
             "switch_dpid": switch_dpid,
             "in_port": in_port,
         }
+        n_pipeline = self._asegurar_pipeline_fallback_en_borde(switch_dpid)
+        if n_pipeline:
+            print(f"    ✓ Pipeline T2→T3→T4 base — {n_pipeline} flows")
+        session_gate = self._instalar_session_gate(mac, switch_dpid, in_port, vlan_id)
+        if session_gate:
+            print(
+                f"    ✓ T1 session gate — idle {Config.SESSION_IDLE_TIMEOUT}s"
+            )
+        session_classifier = self._instalar_clasificador_sesion_t0(
+            mac, switch_dpid, in_port
+        )
+        if session_classifier:
+            print("    ✓ T0 session classifier → T1")
+
+        if Config.REACTIVE_DATA_FLOWS_ENABLED:
+            n_t2_login = 0
+            n_t2_permisos = 0
+            n_t3_deferidos = 0
+            for permiso in politicas.get("permisos", []):
+                tabla_permiso = str(permiso.get("tabla") or "T2").upper()
+                if tabla_permiso == "T3":
+                    n_t3_deferidos += 1
+                    continue
+                if tabla_permiso != "T2":
+                    tabla_permiso = "T2"
+
+                ip_dst = permiso["ip_dst"]
+                host_destino = self.onos.get_host_by_ip(ip_dst)
+                if not host_destino:
+                    print(f"    ! T2 {ip_dst}: destino no aprendido en ONOS; "
+                          f"queda bajo demanda por T4")
+                    continue
+
+                puertos = permiso.get("puertos") or []
+                if not puertos:
+                    print(f"    ! T2 {ip_dst}: permiso sin puerto TCP; "
+                          f"queda bajo demanda por T4")
+                    continue
+
+                for tcp_port in puertos:
+                    flows = self._instalar_camino_tcp(
+                        mac, host_origen, host_destino,
+                        ip_asignada, ip_dst, tcp_port, vlan_id,
+                        Config.DATA_FLOW_TIMEOUT,
+                        target_table="T2",
+                        expires_at=permiso.get("expires_at"),
+                    )
+                    if flows:
+                        n_t2_permisos += 1
+                        n_t2_login += flows
+                        print(
+                            f"    ✓ T2 proactivo {ip_dst}:{tcp_port} — "
+                            f"{flows} flows"
+                        )
+                    else:
+                        print(
+                            f"    ! T2 {ip_dst}:{tcp_port} — sin ruta completa; "
+                            "queda bajo demanda por T4"
+                        )
+
+            n_total = len(self.flows_por_sesion.get(mac.lower(), []))
+            print(
+                "  Modo T2 hibrido: permisos T2 normales proactivos; "
+                "T3 excepciones bajo demanda"
+            )
+            self.logger.log({
+                "modulo":    "M6",
+                "evento":    "sesion_activada_t2_hibrida",
+                "usuario":   codigo_pucp,
+                "rol":       nombre_rol,
+                "vlan":      vlan_id,
+                "mac":       mac,
+                "switch":    switch_dpid,
+                "puerto":    in_port,
+                "n_flows":   n_total,
+                "t2_login":  n_t2_login,
+                "t2_permisos": n_t2_permisos,
+                "t3_deferidos": n_t3_deferidos,
+            })
+            return {
+                "ok": True,
+                "reactive_mode": True,
+                "hybrid_t2_mode": True,
+                "n_flows": n_total,
+                "t2_login": n_t2_login,
+                "t2_permisos": n_t2_permisos,
+                "t3_deferidos": n_t3_deferidos,
+            }
 
         for permiso in politicas.get("permisos", []):
             ip_dst = permiso["ip_dst"]
+            tabla_permiso = str(permiso.get("tabla") or "T2").upper()
+            if tabla_permiso not in ("T2", "T3"):
+                tabla_permiso = "T2"
             host_destino = self.onos.get_host_by_ip(ip_dst)
             if not host_destino:
                 print(f"    ! {ip_dst}: destino no aprendido en ONOS; "
@@ -1684,11 +2347,14 @@ class M6Translator:
             for tcp_port in puertos:
                 flows = self._instalar_camino_tcp(
                     mac, host_origen, host_destino,
-                    ip_asignada, ip_dst, tcp_port, session_timeout
+                    ip_asignada, ip_dst, tcp_port, vlan_id,
+                    session_timeout,
+                    target_table=tabla_permiso,
+                    expires_at=permiso.get("expires_at"),
                 )
                 if flows:
                     n_allow += 1
-                    print(f"    ✓ {ip_dst}:{tcp_port} — {flows} flows ruta")
+                    print(f"    ✓ {ip_dst}:{tcp_port} — {flows} flows {tabla_permiso}")
                 else:
                     print(f"    ! {ip_dst}:{tcp_port} — sin ruta completa")
 
@@ -1712,7 +2378,7 @@ class M6Translator:
 
         n_total = len(self.flows_por_sesion.get(mac, []))
         print(f"  ✓ Sesión activada — {n_total} flows  "
-              f"(T1:1  T0-ALLOW:{n_allow}  T3+T0-DENY:{n_deny*2})")
+              f"(ALLOW permisos:{n_allow}  T3+T0-DENY:{n_deny*2})")
 
         self.logger.log({
             "modulo":    "M6",
@@ -1738,6 +2404,8 @@ class M6Translator:
         mac = mac.lower()
         with self._lock:
             flows = self.flows_por_sesion.pop(mac, [])
+            self.session_gates.pop(mac, None)
+            self.session_classifiers.pop(mac, None)
         print(f"\n[M6] Cerrando sesión MAC={mac} — {len(flows)} flows")
         for device_id, flow_id in flows:
             self.onos.eliminar_flow(device_id, flow_id)
@@ -1950,10 +2618,21 @@ def endpoint_cerrar_sesion():
     return jsonify({"ok": True}), 200
 
 
+@app.route("/m6/flow_expired", methods=["POST"])
+def endpoint_flow_expired():
+    """Evento desde app ONOS cuando expira/remueve el T1 session gate."""
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    data = request.json or {}
+    resultado = m6.procesar_flow_expired(data)
+    return jsonify(resultado), 200 if resultado.get("ok") else 400
+
+
 @app.route("/m6/portal/sync", methods=["POST"])
 def endpoint_portal_sync():
     """Instala rutas explicitas host<->portal TCP/8282 para hosts aprendidos."""
-    resultado = m6.sincronizar_portal_cuarentena()
+    force = str(request.args.get("force", "")).lower() in ("1", "true", "yes")
+    resultado = m6.sincronizar_portal_cuarentena(force=force)
     return jsonify(resultado), 200 if resultado.get("ok") else 400
 
 
@@ -2027,6 +2706,11 @@ def endpoint_status():
         portal_flows = {mac: len(flows)
                         for mac, flows in m6.flows_portal.items()}
         portal_ips = dict(m6.portal_ips)
+        now = time.time()
+        t0_shared_flows = sum(
+            1 for _, _, expires_at in m6.flows_t0_shared.values()
+            if expires_at > now
+        )
     return jsonify({
         "status":           "ok",
         "onos_url":         Config.ONOS_URL,
@@ -2036,6 +2720,7 @@ def endpoint_status():
         "sesiones_activas": sesiones,
         "portal_flows":     portal_flows,
         "portal_ips":       portal_ips,
+        "t0_shared_flows":  t0_shared_flows,
         "network_actions_enabled": Config.NETWORK_ACTIONS_ENABLED,
         "onos_writes_enabled": Config.ONOS_WRITES_ENABLED,
         "onos_reads_enabled": Config.ONOS_READS_ENABLED,
@@ -2043,6 +2728,9 @@ def endpoint_status():
         "automatic_actions_enabled": Config.M4_AUTOMATIC_ACTIONS_ENABLED,
         "startup_flow_install_enabled": Config.STARTUP_FLOW_INSTALL_ENABLED,
         "portal_sync_interval": Config.PORTAL_SYNC_INTERVAL,
+        "reactive_data_flows_enabled": Config.REACTIVE_DATA_FLOWS_ENABLED,
+        "session_expire_on_t1_removed": Config.SESSION_EXPIRE_ON_T1_REMOVED,
+        "session_idle_timeout": Config.SESSION_IDLE_TIMEOUT,
     }), 200
 
 
