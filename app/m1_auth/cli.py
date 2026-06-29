@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """
-cli.py — Cliente CLI del Portal Cautivo — SDN PUCP
+cliYo.py — Cliente CLI del Portal Cautivo — SDN PUCP
 Módulo M1 | Grupo 2 - TEL354
 - Sheila J
-
-Corre en la máquina del usuario (host sin GUI en la VLAN de
-cuarentena). No contiene lógica de RADIUS/MySQL/M6: solo pide
-credenciales por consola, hace POST/GET HTTP al servidor (web.py
-en la VM-Auth) y muestra la respuesta con el mismo formato de
-menús que el portal_cautivo.py original.
 
 Endpoints reales consumidos (definidos en web.py):
   POST /auth/login            {"usuario": "...", "password": "..."}
@@ -47,9 +41,7 @@ class Config:
 
 def obtener_ip_local(host_servidor):
     """
-    Obtiene la IP real de ESTE equipo (el cliente), no la del servidor. Abre un socket UDP "falso" hacia el servidor (no envía datos, solo
-    fuerza al sistema operativo a elegir la interfaz de salida correcta) y lee la IP local que el OS asignó a esa conexión. Esto es lo más
-    cercano a "qué IP me ve el portal cautivo" sin depender de SSH_CLIENT, que solo existe en sesiones SSH.
+    Obtiene la IP real de ESTE equipo (el cliente), no la del servidor. Abre un socket UDP "falso" hacia el servidor y lee la IP local que el OS asignó a esa conexión. 
     """
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -73,8 +65,7 @@ class PortalClient:
             return resp.json()
         except requests.exceptions.ConnectionError:
             return {"ok": False,
-                    "motivo": f"No se pudo conectar al portal cautivo "
-                              f"({self.base_url}). ¿Está corriendo web.py?"}
+                    "motivo": f"No se pudo conectar al portal cautivo " f"({self.base_url}). ¿Está corriendo web.py?"}
         except requests.exceptions.Timeout:
             return {"ok": False, "motivo": "El portal cautivo no respondió a tiempo."}
         except Exception as e:
@@ -85,8 +76,7 @@ class PortalClient:
             resp = requests.get(f"{self.base_url}{endpoint}", timeout=15)
             return resp.json()
         except requests.exceptions.ConnectionError:
-            return {"ok": False, "motivo": f"No se pudo conectar al portal cautivo "
-                                            f"({self.base_url})."}
+            return {"ok": False, "motivo": f"No se pudo conectar al portal cautivo " f"({self.base_url})."}
         except Exception as e:
             return {"ok": False, "motivo": f"Error inesperado: {e}"}
 
@@ -194,50 +184,46 @@ class CaptivePortalCLI:
             input("  Presiona Enter para volver...")
 
     def _mostrar_recursos_sesion(self, nombre_rol, vlan_id):
-        """
-        Vista de recursos para la sesión activa actual, separados por
-        tabla de origen: T2 (rol principal) y T3 (excepción temporal).
-        Si una sección no tiene recursos, simplemente no se imprime.
-        """
-        print("\n")
-        print(Config.SEP)
-        print(f"  Recursos permitidos - {nombre_rol}  (VLAN {vlan_id})")
-        print(Config.SEP)
-        resp = self.client.recursos_sesion()
-        if not resp.get("ok"):
-            resp = self.client.recursos(nombre_rol)
-        recursos = resp.get("recursos", []) if resp.get("ok") else []
+            """
+            Vista de recursos para la sesión activa actual, separados por tabla de origen: T2 (rol principal) y T3 (excepción temporal).
+            Si una sección no tiene recursos, se imprime su encabezado igual, con la leyenda "No hay recursos permitidos" en lugar de la tabla.
+            """
+            print("\n")
+            print(Config.SEP)
+            print(f"  Recursos permitidos - {nombre_rol}  (VLAN {vlan_id})")
+            print(Config.SEP)
+            resp = self.client.recursos_sesion()
+            if not resp.get("ok"):
+                resp = self.client.recursos(nombre_rol)
+            recursos = resp.get("recursos", []) if resp.get("ok") else []
 
-        if not recursos:
-            print("  Sin recursos definidos para esta sesion.")
-        else:
             for tabla, titulo in (("T2", "T2 / Rol principal"),
-                                   ("T3", "T3 / Excepcion")):
+                                ("T3", "T3 / Excepcion")):
                 items = [r for r in recursos if r.get("tabla", "T2") == tabla]
-                if not items:
-                    continue
                 print(f"  {titulo}")
-                print(f"  {'RECURSO':<28} {'IP DESTINO':<16} "
-                      f"{'PUERTO':>6}  {'PROTO':<5}")
-                print("  " + Config.SEP2)
-                for r in items:
-                    print(f"  {r.get('nombre_recurso',''):<28} "
-                          f"{r.get('ip_dst',''):<16} "
-                          f"{str(r.get('puerto','')):>6}  "
-                          f"{r.get('protocolo',''):<5}")
+                if not items:
+                    print("  No hay recursos permitidos")
+                else:
+                    print(f"  {'RECURSO':<28} {'IP DESTINO':<16} "
+                        f"{'PUERTO':>6}  {'PROTO':<5}")
+                    print("  " + Config.SEP2)
+                    for r in items:
+                        print(f"  {r.get('nombre_recurso',''):<28} "
+                            f"{r.get('ip_dst',''):<16} "
+                            f"{str(r.get('puerto','')):>6}  "
+                            f"{r.get('protocolo',''):<5}")
                 print()
-        print(Config.SEP)
-        input("  Presiona Enter para volver...")
+            print(Config.SEP)
+            input("  Presiona Enter para volver...")
 
     def _sesion_activa(self, sesion):
         """
         Menú único de sesión activa (estudiante/docente/admin/visitante).
-        Calcula y muestra en vivo el tiempo restante antes del cierre
-        automático, basado en session_timeout (segundos): para usuarios
-        normales viene del atributo Session-Timeout de FreeRADIUS; para
-        visitantes es el valor fijo de 1800s (30 min) que envía el servidor.
+        Calcula y muestra en vivo el tiempo restante antes del cierre automático, basado en session_timeout (segundos): 
+        para usuarios normales viene del atributo Session-Timeout de FreeRADIUS; para visitantes es el valor fijo de 1800s (30 min) que envía el servidor.
 
         Solo dos opciones: ver recursos permitidos o cerrar sesión.
+        
         Si el usuario no elige nada antes de que el tiempo se agote, la
         sesión se cierra sola.
         """
@@ -356,7 +342,6 @@ class CaptivePortalCLI:
             input("  Presiona Enter para volver...")
 
     # El loop del menú para que sea interactivo
-
     def run(self):
         while True:
             estado = self.client.sesion_actual()
@@ -384,8 +369,7 @@ class CaptivePortalCLI:
 
 def main():
     parser = argparse.ArgumentParser(description="Cliente CLI del Portal Cautivo PUCP")
-    parser.add_argument("--host", default="192.168.100.110",
-                         help="IP del servidor del portal cautivo (VM-Auth)")
+    parser.add_argument("--host", default="192.168.100.110", help="IP del servidor del portal cautivo (VM-Auth)")
     parser.add_argument("--port", default="8282", help="Puerto del servidor del portal cautivo")
     args = parser.parse_args()
 
