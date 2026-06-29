@@ -1,36 +1,20 @@
 #!/usr/bin/env python3
 """
-web.py — Portal Cautivo Web (API JSON) — SDN PUCP
+webYO.py — Portal Cautivo Web (API JSON) — SDN PUCP
 Módulo M1 | Grupo 2 - TEL354
 - Sheila J 
 Ejecutar en VM-Auth: python3 -u web.py
 
-¡¡¡ MODO DE PRUEBA ACTUAL: Config.M6_HABILITADO = False en m1_auth.py !!!!
-Esto significa que /auth/login y /auth/visitante SÍ validan contra
-FreeRADIUS y SÍ registran en MySQL (sesiones_activas, ip_mac_binding,
-historial_sesiones), pero NO llaman a M6/ONOS — se usan mac/switch_dpid/
-in_port "dummy" en su lugar. Para activar la integración real con M6,
-cambia M6_HABILITADO = True en m1_auth.py.
-
-Sirve el formulario HTML y expone los endpoints de autenticación
-consumidos vía fetch()/JSON, según el contrato:
-
-    POST /auth/login
-    Content-Type: application/json
-    {"usuario": "20192434", "password": "..."}
-
-Toda la lógica real vive en m1_auth.py. Este archivo solo traduce
-HTTP <-> llamadas al núcleo, igual que cli.py traduce input()/print().
 """
 from flask import Flask, request, jsonify, render_template_string
 
 from m1_auth import Config, autenticar, autenticar_visitante, cerrar_sesion, \
-    obtener_recursos_permitidos
+    obtener_recursos_permitidos, obtener_sesion_actual, obtener_recursos_sesion
 
 app = Flask(__name__)
 
 HOST = "0.0.0.0"
-PORT = 8282  # coincide con el ejemplo: 192.168.100.100:8282
+PORT = 8282  # coincide con el ejemplo: 192.168.100.110:8282
 
 # HTML --> si hubiera interfaz grafica, se vería por ahi el formulario de ingreso :'v
 PAGE = """<!DOCTYPE html>
@@ -136,10 +120,8 @@ def auth_login():
 
     La IP real del cliente se toma de request.remote_addr.
 
-    La respuesta incluye "session_timeout" (segundos) cuando ok=true,
-    tomado del atributo Session-Timeout de FreeRADIUS para ese rol.
-    El cliente lo usa para mostrar la cuenta regresiva hasta el
-    cierre automático de sesión.
+    La respuesta incluye "session_timeout" (segundos) cuando ok=true, tomado del atributo Session-Timeout de FreeRADIUS para ese rol.
+    El cliente lo usa para mostrar la cuenta regresiva hasta el cierre automático de sesión.
     """
     data = request.get_json(silent=True) or {}
     usuario  = data.get("usuario", "").strip()
@@ -160,7 +142,7 @@ def auth_visitante():
     Content-Type: application/json
     {"correo": "...", "password": "..."}
 
-    La respuesta incluye "session_timeout" fijo en 1800s (30 min), regla de negocio para visitantes.
+    La respuesta incluye "session_timeout" fijo en 1800s (30 min), regla para visitantes.
     """
     data = request.get_json(silent=True) or {}
     correo   = data.get("correo", "").strip()
@@ -195,16 +177,44 @@ def auth_logout():
     return jsonify(resultado), (200 if resultado["ok"] else 404)
 
 
+@app.route("/auth/sesion/actual", methods=["GET"])
+def auth_sesion_actual():
+    """
+    GET /auth/sesion/actual
+
+    Resuelve la MAC del solicitante a partir de su IP (request.remote_addr) y consulta si existe una sesión activa para ese host en sesiones_activas.
+    Usado por cli.py al iniciar/reiniciar para resumir sesión sin pedir login otra vez si el host ya estaba autenticado.
+
+    Respuesta:
+      {"ok": true, "activa": false}
+      {"ok": true, "activa": true, "sesion": {...}}
+    """
+    resultado = obtener_sesion_actual(request.remote_addr)
+    return jsonify(resultado), (200 if resultado.get("ok") else 500)
+
+
+@app.route("/auth/sesion/recursos", methods=["GET"])
+def auth_sesion_recursos():
+    """
+    GET /auth/sesion/recursos
+
+    Devuelve los recursos permitidos para la sesión activa del solicitante (resuelta por IP), combinando T2 (reglas del rol,
+    politicas_rbac) y T3 (excepciones temporales del usuario, politicas_temporales, no expiradas). Si no hay sesión activa para esa IP, responde ok=false.
+
+    Respuesta:
+      {"ok": true, "sesion": {...}, "recursos": [...]}
+      {"ok": false, "motivo": "No hay sesion activa."}
+    """
+    resultado = obtener_recursos_sesion(request.remote_addr)
+    return jsonify(resultado), (200 if resultado.get("ok") else 404)
+
+
 @app.route("/auth/recursos/<nombre_rol>", methods=["GET"])
 def auth_recursos(nombre_rol):
     """
     GET /auth/recursos/<nombre_rol>
 
-    Devuelve la lista de recursos permitidos (ALLOW) para un rol,
-    leída directamente de politicas_rbac/recursos/servidores.
-    Es de SOLO LECTURA: no instala flows ni modifica nada en ONOS,
-    únicamente informa al usuario qué tiene acceso permitido según
-    su rol (lo que ve, no lo que aplica — eso es trabajo de M2/M6).
+    Devuelve la lista de recursos permitidos (ALLOW) para un rol, leída directamente de politicas_rbac/recursos/servidores.
     """
     recursos = obtener_recursos_permitidos(nombre_rol)
     return jsonify({"ok": True, "nombre_rol": nombre_rol, "recursos": recursos}), 200
