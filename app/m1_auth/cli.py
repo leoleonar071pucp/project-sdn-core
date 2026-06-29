@@ -2,7 +2,7 @@
 """
 cli.py — Cliente CLI del Portal Cautivo — SDN PUCP
 Módulo M1 | Grupo 2 - TEL354
-- Sheila J 
+- Sheila J
 
 Corre en la máquina del usuario (host sin GUI en la VLAN de
 cuarentena). No contiene lógica de RADIUS/MySQL/M6: solo pide
@@ -15,6 +15,8 @@ Endpoints reales consumidos (definidos en web.py):
   POST /auth/visitante        {"correo": "...", "password": "..."}
   POST /auth/logout           {"mac": "...", "id_usuario": 0, ...}
   GET  /auth/recursos/<rol>
+  GET  /auth/sesion/actual
+  GET  /auth/sesion/recursos
 
 Requiere:
   pip3 install requests
@@ -67,7 +69,7 @@ class PortalClient:
 
     def _post(self, endpoint, body):
         try:
-            resp = requests.post(f"{self.base_url}{endpoint}",json=body, timeout=15)
+            resp = requests.post(f"{self.base_url}{endpoint}", json=body, timeout=15)
             return resp.json()
         except requests.exceptions.ConnectionError:
             return {"ok": False,
@@ -83,7 +85,8 @@ class PortalClient:
             resp = requests.get(f"{self.base_url}{endpoint}", timeout=15)
             return resp.json()
         except requests.exceptions.ConnectionError:
-            return {"ok": False, "motivo": f"No se pudo conectar al portal cautivo "f"({self.base_url})."}
+            return {"ok": False, "motivo": f"No se pudo conectar al portal cautivo "
+                                            f"({self.base_url})."}
         except Exception as e:
             return {"ok": False, "motivo": f"Error inesperado: {e}"}
 
@@ -91,14 +94,23 @@ class PortalClient:
         return self._post("/auth/login", {"usuario": usuario, "password": password})
 
     def login_visitante(self, correo, password):
-        return self._post("/auth/visitante",{"correo": correo, "password": password})
+        return self._post("/auth/visitante", {"correo": correo, "password": password})
 
     def logout(self, mac, id_usuario, codigo_pucp=None,
                ip_asignada=None, es_visitante=False):
-        return self._post("/auth/logout", { "mac": mac, "id_usuario": id_usuario,"codigo_pucp": codigo_pucp, "ip_asignada": ip_asignada, "es_visitante": es_visitante, })
+        return self._post("/auth/logout", {
+            "mac": mac, "id_usuario": id_usuario, "codigo_pucp": codigo_pucp,
+            "ip_asignada": ip_asignada, "es_visitante": es_visitante,
+        })
 
     def recursos(self, nombre_rol):
         return self._get(f"/auth/recursos/{nombre_rol}")
+
+    def sesion_actual(self):
+        return self._get("/auth/sesion/actual")
+
+    def recursos_sesion(self):
+        return self._get("/auth/sesion/recursos")
 
 
 def formatear_tiempo(segundos):
@@ -112,23 +124,21 @@ def formatear_tiempo(segundos):
 
 
 class CaptivePortalCLI:
-    """Interfaz de texto. Misma UX que portal_cautivo.py original, pero ahora habla con el servidor por HTTP en vez de llamar
-    directo a la lógica de negocio.
+    """Interfaz de texto. Misma UX que portal_cautivo.py original, pero ahora habla con el servidor por HTTP en vez de llamar directo a la lógica de negocio.
     """
 
     def __init__(self, client, host_servidor):
         self.client = client
         self.ip_local = obtener_ip_local(host_servidor)
 
-    # Menu 
-
+    # Menu
     def _mostrar_menu_principal(self):
         print("\n")
         print(Config.SEP)
         print("        PORTAL CAUTIVO — RED PUCP")
         print("        Sistema de Autenticación SDN")
         print(Config.SEP)
-        print("  Estado     : Cuarentena (esperando autenticación)")
+        print("  Estado     : esperando autenticación")
         print(f"  IP local   : {self.ip_local}  (VLAN {Config.VLAN_CUARENTENA} — cuarentena)")
         print(f"  Servidor   : {self.client.base_url}")
         print(Config.SEP2)
@@ -172,46 +182,72 @@ class CaptivePortalCLI:
             print("  ✓ ACCESO CONCEDIDO")
             print(Config.SEP)
             self._sesion_activa(resultado)
+        elif resultado.get("codigo_error") == "SESION_YA_ACTIVA" and resultado.get("sesion"):
+            print(Config.SEP)
+            print("  Ya existe una sesion activa para este host.")
+            print(Config.SEP)
+            self._sesion_activa(resultado["sesion"])
         else:
             print(Config.SEP)
             print(f"  ✗ {resultado.get('motivo', 'Error desconocido')}")
             print(Config.SEP)
             input("  Presiona Enter para volver...")
 
-    def _mostrar_recursos(self, nombre_rol, vlan_id):
+    def _mostrar_recursos_sesion(self, nombre_rol, vlan_id):
+        """
+        Vista de recursos para la sesión activa actual, separados por
+        tabla de origen: T2 (rol principal) y T3 (excepción temporal).
+        Si una sección no tiene recursos, simplemente no se imprime.
+        """
         print("\n")
         print(Config.SEP)
-        print(f"  Recursos permitidos — {nombre_rol}  (VLAN {vlan_id})")
+        print(f"  Recursos permitidos - {nombre_rol}  (VLAN {vlan_id})")
         print(Config.SEP)
-        resp = self.client.recursos(nombre_rol)
+        resp = self.client.recursos_sesion()
+        if not resp.get("ok"):
+            resp = self.client.recursos(nombre_rol)
         recursos = resp.get("recursos", []) if resp.get("ok") else []
 
         if not recursos:
-            print("  Sin recursos definidos para este rol.")
+            print("  Sin recursos definidos para esta sesion.")
         else:
-            print(f"  {'RECURSO':<28} {'IP DESTINO':<16} "
-                  f"{'PUERTO':>6}  {'PROTO':<5}")
-            print("  " + Config.SEP2)
-            for r in recursos:
-                print(f"  {r.get('nombre_recurso',''):<28} "
-                      f"{r.get('ip_dst',''):<16} "
-                      f"{str(r.get('puerto','')):>6}  "
-                      f"{r.get('protocolo',''):<5}")
+            for tabla, titulo in (("T2", "T2 / Rol principal"),
+                                   ("T3", "T3 / Excepcion")):
+                items = [r for r in recursos if r.get("tabla", "T2") == tabla]
+                if not items:
+                    continue
+                print(f"  {titulo}")
+                print(f"  {'RECURSO':<28} {'IP DESTINO':<16} "
+                      f"{'PUERTO':>6}  {'PROTO':<5}")
+                print("  " + Config.SEP2)
+                for r in items:
+                    print(f"  {r.get('nombre_recurso',''):<28} "
+                          f"{r.get('ip_dst',''):<16} "
+                          f"{str(r.get('puerto','')):>6}  "
+                          f"{r.get('protocolo',''):<5}")
+                print()
         print(Config.SEP)
         input("  Presiona Enter para volver...")
 
     def _sesion_activa(self, sesion):
         """
-        Menú de sesión activa para usuario normal (estudiante/docente/admin). Calcula y muestra en vivo el tiempo restante antes del cierre
-        automático, basado en session_timeout (segundos) devuelto por /auth/login (atributo Session-Timeout de FreeRADIUS para ese rol).
-        Si el usuario no elige nada antes de que el tiempo se agote, la sesión se cierra sola.
+        Menú único de sesión activa (estudiante/docente/admin/visitante).
+        Calcula y muestra en vivo el tiempo restante antes del cierre
+        automático, basado en session_timeout (segundos): para usuarios
+        normales viene del atributo Session-Timeout de FreeRADIUS; para
+        visitantes es el valor fijo de 1800s (30 min) que envía el servidor.
+
+        Solo dos opciones: ver recursos permitidos o cerrar sesión.
+        Si el usuario no elige nada antes de que el tiempo se agote, la
+        sesión se cierra sola.
         """
-        codigo_pucp = sesion.get("codigo_pucp")
+        codigo_pucp = sesion.get("codigo_pucp") or sesion.get("correo") or "VISITANTE"
         nombre_rol = sesion.get("nombre_rol")
         vlan_id = sesion.get("vlan_id")
         ip_asignada = sesion.get("ip_asignada")
-        mac = sesion.get("mac")
-        id_usuario = sesion.get("id_usuario")
+        mac = sesion.get("mac") or sesion.get("mac_address")
+        id_usuario = sesion.get("id_usuario", 0)
+        es_visitante = sesion.get("es_visitante", False)
         session_timeout = sesion.get("session_timeout", 28800)
 
         inicio = datetime.datetime.now()
@@ -227,7 +263,7 @@ class CaptivePortalCLI:
                 resp = self.client.logout(
                     mac=mac, id_usuario=id_usuario,
                     codigo_pucp=codigo_pucp, ip_asignada=ip_asignada,
-                    es_visitante=False
+                    es_visitante=es_visitante
                 )
                 if resp.get("ok"):
                     print("  ✓ Sesión cerrada por expiración de tiempo")
@@ -244,7 +280,7 @@ class CaptivePortalCLI:
             print(f"  Usuario       : {codigo_pucp}")
             print(f"  Rol           : {nombre_rol}")
             print(f"  VLAN          : {vlan_id}")
-            print(f"  IP asignada   : {ip_asignada}  (sin cambios desde cuarentena)")
+            print(f"  IP asignada   : {ip_asignada}")
             print(f"  Tiempo rest.  : {formatear_tiempo(restante)} "
                   f"(antes de cierre automático)")
             print(Config.SEP2)
@@ -252,17 +288,22 @@ class CaptivePortalCLI:
             print("  [2] Cerrar sesión")
             print(Config.SEP)
 
-            opcion = input("  Opción: ").strip()
+            try:
+                opcion = input("  Opción: ").strip()
+            except KeyboardInterrupt:
+                print("\n\n  Saliendo del CLI. La sesión sigue activa.\n")
+                sys.exit(0)
 
             if opcion == "1":
-                self._mostrar_recursos(nombre_rol, vlan_id)
+                self._mostrar_recursos_sesion(nombre_rol, vlan_id)
 
             elif opcion == "2":
                 print("\n")
                 print(Config.SEP)
                 print("  Cerrando sesión...")
                 resp = self.client.logout(
-                    mac=mac, id_usuario=id_usuario, codigo_pucp=codigo_pucp, ip_asignada=ip_asignada, es_visitante=False
+                    mac=mac, id_usuario=id_usuario, codigo_pucp=codigo_pucp,
+                    ip_asignada=ip_asignada, es_visitante=es_visitante
                 )
                 if resp.get("ok"):
                     print("  ✓ Sesión cerrada correctamente")
@@ -274,7 +315,7 @@ class CaptivePortalCLI:
             else:
                 print("  Opción no válida.\n")
 
-    # Formulario de ingreso para Visitante 
+    # Formulario de ingreso para Visitante
 
     def flujo_visitante(self):
         print("\n")
@@ -302,93 +343,33 @@ class CaptivePortalCLI:
 
         if resultado.get("ok"):
             print(f"  ✓ Sesión registrada — 30 minutos de acceso")
-            self._sesion_activa_visitante(resultado)
+            self._sesion_activa(resultado)
+        elif resultado.get("codigo_error") == "SESION_YA_ACTIVA" and resultado.get("sesion"):
+            print(Config.SEP)
+            print("  Ya existe una sesion activa para este host.")
+            print(Config.SEP)
+            self._sesion_activa(resultado["sesion"])
         else:
             print(Config.SEP)
             print(f"  ✗ {resultado.get('motivo', 'Error desconocido')}")
             print(Config.SEP)
             input("  Presiona Enter para volver...")
 
-    def _sesion_activa_visitante(self, sesion):
-        """
-        Menú de sesión activa para visitante. Misma cuenta regresiva en vivo que _sesion_activa(), pero basada en
-        Config.VISITANTE_TIMEOUT_SEG (30 min fijos) en vez de  Session-Timeout de RADIUS.
-        """
-        correo = sesion.get("correo")
-        nombre_rol = sesion.get("nombre_rol")
-        vlan_id = sesion.get("vlan_id")
-        ip_asignada = sesion.get("ip_asignada")
-        mac = sesion.get("mac")
-        session_timeout = sesion.get("session_timeout", 1800)
-
-        inicio = datetime.datetime.now()
-        limite = inicio + datetime.timedelta(seconds=session_timeout)
-
-        while True:
-            restante = (limite - datetime.datetime.now()).total_seconds()
-
-            if restante <= 0:
-                print("\n")
-                print(Config.SEP)
-                print("  ⚠  Sesión de visitante expirada (30 minutos).")
-                resp = self.client.logout(
-                    mac=mac, id_usuario=0, codigo_pucp=correo,
-                    ip_asignada=ip_asignada, es_visitante=True
-                )
-                if resp.get("ok"):
-                    print("  ✓ Sesión cerrada automáticamente")
-                    print("  ✓ Credenciales temporales eliminadas")
-                else:
-                    print(f"  ⚠  {resp.get('motivo', '')}")
-                print(Config.SEP)
-                input("  Presiona Enter para volver...")
-                return
-
-            print("\n")
-            print(Config.SEP)
-            print("  ✓  ACCESO VISITANTE — Sesión activa")
-            print(Config.SEP)
-            print(f"  Correo        : {correo}")
-            print(f"  Rol           : {nombre_rol}")
-            print(f"  VLAN          : {vlan_id}")
-            print(f"  IP asignada   : {ip_asignada}  (sin cambios desde cuarentena)")
-            print(f"  Tiempo rest.  : {formatear_tiempo(restante)} "
-                  f"(antes de cierre automático)")
-            print(Config.SEP2)
-            print("  [1] Ver recursos permitidos")
-            print("  [2] Cerrar sesión")
-            print(Config.SEP)
-
-            opcion = input("  Opción: ").strip()
-
-            if opcion == "1":
-                self._mostrar_recursos(nombre_rol, vlan_id)
-
-            elif opcion == "2":
-                print("\n")
-                print(Config.SEP)
-                print("  Cerrando sesión visitante...")
-                resp = self.client.logout(
-                    mac=mac, id_usuario=0, codigo_pucp=correo,
-                    ip_asignada=ip_asignada, es_visitante=True
-                )
-                if resp.get("ok"):
-                    print("  ✓ Sesión cerrada")
-                    print("  ✓ Credenciales eliminadas")
-                else:
-                    print(f"  ⚠  {resp.get('motivo', '')}")
-                print(Config.SEP)
-                input("  Presiona Enter para volver...")
-                return
-            else:
-                print("  Opción no válida.\n")
-
-    # El loop del menú para que sea interactivo 
+    # El loop del menú para que sea interactivo
 
     def run(self):
         while True:
+            estado = self.client.sesion_actual()
+            if estado.get("ok") and estado.get("activa") and estado.get("sesion"):
+                self._sesion_activa(estado["sesion"])
+                continue
+
             self._mostrar_menu_principal()
-            opcion = input("  Opción: ").strip()
+            try:
+                opcion = input("  Opción: ").strip()
+            except KeyboardInterrupt:
+                print("\n  Saliendo del portal.\n")
+                sys.exit(0)
 
             if opcion == "1":
                 self.login()
@@ -403,7 +384,8 @@ class CaptivePortalCLI:
 
 def main():
     parser = argparse.ArgumentParser(description="Cliente CLI del Portal Cautivo PUCP")
-    parser.add_argument("--host", default="192.168.100.100",help="IP del servidor del portal cautivo (VM-Auth)")
+    parser.add_argument("--host", default="192.168.100.110",
+                         help="IP del servidor del portal cautivo (VM-Auth)")
     parser.add_argument("--port", default="8282", help="Puerto del servidor del portal cautivo")
     args = parser.parse_args()
 
