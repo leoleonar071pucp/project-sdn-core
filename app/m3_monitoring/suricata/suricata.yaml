@@ -46,6 +46,8 @@ decoder:
     checksum-validation: no
   vlan:
     use-for-tracking: true  # Track VLAN IDs in flow hashing
+  ipv6:
+    enabled: no
 
 # ------------------ Flujo y desempeño ------------------
 flow:
@@ -91,7 +93,7 @@ outputs:
         - dns
         - tls
         - arp:
-            enabled: no
+            enabled: yes
         - dhcp:
             enabled: yes
         - flow
