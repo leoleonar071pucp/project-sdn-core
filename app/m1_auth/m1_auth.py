@@ -32,6 +32,37 @@ except ImportError:
     MYSQL_OK = False
     print("[ADVERTENCIA] mysql-connector-python no instalado.")
 
+# ── Cliente M5 (auditoría) 
+import threading
+
+M5_URL = "http://127.0.0.1:5002/m5/log"
+
+def _emitir_evento_m5(evento, usuario=None, rol=None, ip=None, mac=None,
+                       duracion_ms=None, detalle=None):
+    """
+    Envía un evento de auditoría a M5 de forma asíncrona.
+    Si M5 no está disponible, M1 continúa sin fallar.
+    """
+    def _enviar():
+        try:
+            import urllib.request as _ul
+            body = {
+                "evento":      evento,
+                "usuario":     usuario,
+                "rol":         rol,
+                "ip":          ip,
+                "mac":         mac,
+                "duracion_ms": duracion_ms,
+                "detalle":     detalle,
+            }
+            _body = _js.dumps(body).encode("utf-8")
+            _req = _ul.Request(M5_URL, data=_body,
+                              headers={"Content-Type": "application/json"})
+            _ul.urlopen(_req, timeout=3)
+        except Exception:
+            pass  # M5 no disponible — no interrumpe el flujo
+
+    threading.Thread(target=_enviar, daemon=True).start()
 
 # Configuración base 
 class Config:
@@ -777,18 +808,27 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
     if _users.is_blocked(codigo_pucp):
         return {"ok": False, "motivo": "Cuenta bloqueada. Contacta al Administrador TI.", "codigo_error": "CUENTA_BLOQUEADA"}
 
-    nombre_rol, session_timeout = _radius.authenticate(
-        codigo_pucp, password, ip_asignada
-    )
+    # ── M5: medir latencia RADIUS ─────────────────────────────
+    t0 = time.time()
+    nombre_rol, session_timeout = _radius.authenticate(codigo_pucp, password, ip_asignada)
+    duracion_ms = int((time.time() - t0) * 1000)
+    # ─────────────────────────────────────────────────────────
 
     if nombre_rol is None:
         total = _users.increment_failed_attempt(codigo_pucp)
         restantes = Config.MAX_INTENTOS - total
         if total >= Config.MAX_INTENTOS:
+            # ── M5: cuenta bloqueada ──────────────────────────
+            _emitir_evento_m5("cuenta_bloqueada", usuario=codigo_pucp,ip=ip_asignada, duracion_ms=duracion_ms, detalle={"intentos_totales": 3})
+            # ─────────────────────────────────────────────────
             return {"ok": False,
-                    "motivo": "Credenciales inválidas. Cuenta bloqueada por 3 intentos fallidos. Contacta al Administrador TI.","codigo_error": "BLOQUEADO_POR_INTENTOS"}
+                    "motivo": "Credenciales inválidas. Cuenta bloqueada por 3 intentos fallidos. Contacta al Administrador TI.", "codigo_error": "BLOQUEADO_POR_INTENTOS"}
+        # ── M5: login fallido ─────────────────────────────────
+        _emitir_evento_m5("login_fallido", usuario=codigo_pucp,ip=ip_asignada, duracion_ms=duracion_ms, detalle={"intentos_restantes": restantes})
+        # ─────────────────────────────────────────────────────
         return {"ok": False,
-                "motivo": f"Credenciales inválidas. ({restantes} intento(s) restante(s))","codigo_error": "CREDENCIALES_INVALIDAS","intentos_restantes": restantes}
+                "motivo": f"Credenciales inválidas. ({restantes} intento(s) restante(s))",
+                "codigo_error": "CREDENCIALES_INVALIDAS", "intentos_restantes": restantes}
 
     vlan_id = _roles.get_vlan_id(nombre_rol)
     if vlan_id is None:
@@ -836,6 +876,10 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
         # --- FIN bloque M6 real ---
     else:
         print("  [MODO PRUEBA] M6 deshabilitado — no se emite token (no se instalan flows en ONOS)")
+
+    # ── M5: login exitoso ─────────────────────────────────────
+    _emitir_evento_m5("login_exitoso", usuario=codigo_pucp, rol=nombre_rol,  ip=ip_asignada, mac=mac, duracion_ms=duracion_ms, detalle={"vlan_id": vlan_id, "session_timeout": session_timeout,  "id_sesion": id_sesion})
+    # ─────────────────────────────────────────────────────────
 
     return {
         "ok": True,
@@ -914,6 +958,10 @@ def autenticar_visitante(correo: str, password: str, ip_asignada: str) -> dict:
     else:
         print("  [MODO PRUEBA] M6 deshabilitado — no se emite token")
 
+    # ── M5: visitante registrado ──────────────────────────────
+    _emitir_evento_m5("visitante_acceso", usuario=correo, rol="Visitante",ip=ip_asignada, mac=mac,detalle={"id_sesion": id_sesion, "session_timeout": Config.VISITANTE_TIMEOUT_SEG})
+    # ─────────────────────────────────────────────────────────
+
     return {
         "ok": True,
         "correo": correo,
@@ -941,6 +989,10 @@ def cerrar_sesion(mac: str, id_usuario: int, codigo_pucp: str = None, ip_asignad
 
     if es_visitante and codigo_pucp:
         _users.eliminar_visitante(codigo_pucp)
+        
+    # ── M5: logout ────────────────────────────────────────────
+    _emitir_evento_m5("logout", usuario=codigo_pucp,  rol=sesion.get("nombre_rol"), ip=ip_asignada, mac=mac, detalle={"motivo": "VOLUNTARIO",  "id_sesion": sesion.get("id_sesion")})
+    # ─────────────────────────────────────────────────────────
 
     return {"ok": True, "motivo": "Sesión cerrada correctamente."}
 
