@@ -461,13 +461,10 @@ class CaptivePortalCLI:
         Calcula y muestra en vivo el tiempo restante antes del cierre automático, basado en session_timeout (segundos): 
         para usuarios normales viene del atributo Session-Timeout de FreeRADIUS; para visitantes es el valor fijo de 1800s (30 min) que envía el servidor.
 
-        Si el rol es Estudiante_* se agregan las opciones de postular a
-        JP y ver su historial. Si el rol es Admin_TI se agregan las
-        opciones de revisar solicitudes pendientes y revocar permisos
-        otorgados.
+        Si el rol es Estudiante_* se agregan las opciones de postular a JP y ver su historial. Si el rol es Admin_TI se agregan las
+        opciones de revisar solicitudes pendientes y revocar permisos otorgados.
 
-        Si el usuario no elige nada antes de que el tiempo se agote, la
-        sesión se cierra sola.
+        Si el usuario no elige nada antes de que el tiempo se agote, la sesión se cierra sola.
         """
         codigo_pucp = sesion.get("codigo_pucp") or sesion.get("correo") or "VISITANTE"
         nombre_rol = sesion.get("nombre_rol")
@@ -517,17 +514,21 @@ class CaptivePortalCLI:
             print(f"  Tiempo rest.  : {formatear_tiempo(restante)} "
                   f"(antes de cierre automático)")
             print(Config.SEP2)
+            opciones_validas = {"1"}
             print("  [1] Ver recursos permitidos")
-            opciones_validas = {"1", "2"}
             if es_estudiante:
-                print("  [3] Postular a JP")
-                print("  [4] Historial de postulaciones JP")
-                opciones_validas |= {"3", "4"}
-            if es_admin:
-                print("  [3] Revisar solicitudes JP pendientes")
-                print("  [4] Revocar permisos JP otorgados")
-                opciones_validas |= {"3", "4"}
-            print("  [2] Cerrar sesión")
+                print("  [2] Postular a JP")
+                print("  [3] Historial de postulaciones JP")
+                print("  [4] Cerrar sesión")
+                opciones_validas |= {"2", "3", "4"}
+            elif es_admin:
+                print("  [2] Revisar solicitudes JP pendientes")
+                print("  [3] Revocar permisos JP otorgados")
+                print("  [4] Cerrar sesión")
+                opciones_validas |= {"2", "3", "4"}
+            else:
+                print("  [2] Cerrar sesión")
+                opciones_validas |= {"2"}
             print(Config.SEP)
 
             try:
@@ -543,31 +544,41 @@ class CaptivePortalCLI:
             if opcion == "1":
                 self._mostrar_recursos_sesion(nombre_rol, vlan_id)
 
+            elif opcion == "2" and es_estudiante:
+                self._postular_jp()
+            elif opcion == "2" and es_admin:
+                self._admin_jp_solicitudes()
             elif opcion == "2":
-                print("\n")
-                print(Config.SEP)
-                print("  Cerrando sesión...")
-                resp = self.client.logout(
-                    mac=mac, id_usuario=id_usuario, codigo_pucp=codigo_pucp,
-                    ip_asignada=ip_asignada, es_visitante=es_visitante
-                )
-                if resp.get("ok"):
-                    print("  ✓ Sesión cerrada correctamente")
-                else:
-                    print(f"  ⚠  {resp.get('motivo', 'No se pudo cerrar sesión')}")
-                print(Config.SEP)
-                input("  Presiona Enter para volver al menú principal...")
+                self._cerrar_sesion_activa(mac, id_usuario, codigo_pucp,
+                                           ip_asignada, es_visitante)
                 return
 
             elif opcion == "3" and es_estudiante:
-                self._postular_jp()
-            elif opcion == "3" and es_admin:
-                self._admin_jp_solicitudes()
-            elif opcion == "4" and es_estudiante:
                 self._historial_jp()
-            elif opcion == "4" and es_admin:
+            elif opcion == "3" and es_admin:
                 self._admin_jp_revocar()
 
+            elif opcion == "4":
+                self._cerrar_sesion_activa(mac, id_usuario, codigo_pucp,
+                                           ip_asignada, es_visitante)
+                return
+
+    def _cerrar_sesion_activa(self, mac, id_usuario, codigo_pucp,
+                               ip_asignada, es_visitante):
+        print("\n")
+        print(Config.SEP)
+        print("  Cerrando sesión...")
+        resp = self.client.logout(
+            mac=mac, id_usuario=id_usuario, codigo_pucp=codigo_pucp,
+            ip_asignada=ip_asignada, es_visitante=es_visitante
+        )
+        if resp.get("ok"):
+            print("  ✓ Sesión cerrada correctamente")
+        else:
+            print(f"  ⚠  {resp.get('motivo', 'No se pudo cerrar sesión')}")
+        print(Config.SEP)
+        input("  Presiona Enter para volver al menú principal...")
+                
     # Formulario de ingreso para Visitante
 
     def flujo_visitante(self):
