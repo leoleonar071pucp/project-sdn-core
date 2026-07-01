@@ -14,14 +14,17 @@ Endpoints reales consumidos (definidos en web.py):
   POST /jp/solicitar          {"carrera_jp": "..."}
   GET  /jp/historial
   GET  /jp/solicitudes?estado=PENDIENTE   (Admin_TI)
-  POST /jp/resolver           {"id_solicitud": N, "accion": "...",  "expiration": "YYYY-MM-DD HH:MM:SS", "motivo": "..."}  (Admin_TI)
+  POST /jp/resolver           {"id_solicitud": N, "accion": "...",
+                                "expiration": "YYYY-MM-DD HH:MM:SS", "motivo": "..."}  (Admin_TI)
+  GET  /m5/logs               (Admin_TI — proxy en web.py hacia M5)
+  GET  /m5/metricas           (Admin_TI — proxy en web.py hacia M5)
 
 Requiere:
   pip3 install requests
 
 Uso:
   python3 cli.py
-  (opcional) python3 cli.py --host 192.168.100.x --port 8282  (Ip del AAA policies)
+  (opcional) python3 cli.py --host 192.168.100.x --port 8282
 """
 import sys
 import time
@@ -38,17 +41,13 @@ except ImportError:
 
 
 class Config:
-    SEP = "═" * 55
+    SEP  = "═" * 55
     SEP2 = "─" * 55
     VLAN_CUARENTENA = 90
     CARRERAS_JP = ["Estudiante_Telecom", "Estudiante_Informatica", "Estudiante_Electronica"]
-    M5_PORT = 5002
 
 
 def obtener_ip_local(host_servidor):
-    """
-    Obtiene la IP real de ESTE equipo (el cliente), no la del servidor. Abre un socket UDP "falso" hacia el servidor y lee la IP local que el OS asignó a esa conexión. 
-    """
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect((host_servidor, 80))
@@ -64,35 +63,13 @@ class PortalClient:
 
     def __init__(self, base_url):
         self.base_url = base_url.rstrip("/")
-        # M5 corre en el mismo host que web.py pero en puerto 5002
-        host = base_url.split("://")[-1].split(":")[0]
-        self.m5_url = f"http://{host}:{Config.M5_PORT}"
-        
-    def m5_logs(self, evento=None, usuario=None, limite=50):
-        params = f"?limite={limite}"
-        if evento:
-            params += f"&evento={evento}"
-        if usuario:
-            params += f"&usuario={usuario}"
-        try:
-            resp = requests.get(f"{self.m5_url}/m5/logs{params}", timeout=15)
-            return resp.json()
-        except Exception as e:
-            return {"ok": False, "motivo": f"M5 no disponible: {e}"}
-
-    def m5_metricas(self):
-        try:
-            resp = requests.get(f"{self.m5_url}/m5/metricas", timeout=15)
-            return resp.json()
-        except Exception as e:
-            return {"ok": False, "motivo": f"M5 no disponible: {e}"}
 
     def _post(self, endpoint, body):
         try:
             resp = requests.post(f"{self.base_url}{endpoint}", json=body, timeout=15)
             return resp.json()
         except requests.exceptions.ConnectionError:
-            return {"ok": False, "motivo": f"No se pudo conectar al portal cautivo " f"({self.base_url}). ¿Está corriendo web.py?"}
+            return {"ok": False, "motivo": f"No se pudo conectar al portal cautivo ({self.base_url}). ¿Está corriendo web.py?"}
         except requests.exceptions.Timeout:
             return {"ok": False, "motivo": "El portal cautivo no respondió a tiempo."}
         except Exception as e:
@@ -103,18 +80,18 @@ class PortalClient:
             resp = requests.get(f"{self.base_url}{endpoint}", timeout=15)
             return resp.json()
         except requests.exceptions.ConnectionError:
-            return {"ok": False, "motivo": f"No se pudo conectar al portal cautivo " f"({self.base_url})."}
+            return {"ok": False, "motivo": f"No se pudo conectar al portal cautivo ({self.base_url})."}
         except Exception as e:
             return {"ok": False, "motivo": f"Error inesperado: {e}"}
 
+    # ── Auth ─────────────────────────────────────────────────────────────
     def login(self, usuario, password):
         return self._post("/auth/login", {"usuario": usuario, "password": password})
 
     def login_visitante(self, correo, password):
         return self._post("/auth/visitante", {"correo": correo, "password": password})
 
-    def logout(self, mac, id_usuario, codigo_pucp=None,
-               ip_asignada=None, es_visitante=False):
+    def logout(self, mac, id_usuario, codigo_pucp=None, ip_asignada=None, es_visitante=False):
         return self._post("/auth/logout", {
             "mac": mac, "id_usuario": id_usuario, "codigo_pucp": codigo_pucp,
             "ip_asignada": ip_asignada, "es_visitante": es_visitante,
@@ -129,6 +106,7 @@ class PortalClient:
     def recursos_sesion(self):
         return self._get("/auth/sesion/recursos")
 
+    # ── JP ───────────────────────────────────────────────────────────────
     def jp_solicitar(self, carrera_jp):
         return self._post("/jp/solicitar", {"carrera_jp": carrera_jp})
 
@@ -143,11 +121,21 @@ class PortalClient:
             "id_solicitud": id_solicitud, "accion": accion,
             "expiration": expiration, "motivo": motivo,
         })
-    
+
+    # ── M5 (proxy en web.py → mismo puerto 8282) ─────────────────────────
+    def m5_logs(self, evento=None, usuario=None, limite=50):
+        params = f"?limite={limite}"
+        if evento:
+            params += f"&evento={evento}"
+        if usuario:
+            params += f"&usuario={usuario}"
+        return self._get(f"/m5/logs{params}")
+
+    def m5_metricas(self):
+        return self._get("/m5/metricas")
 
 
 def formatear_tiempo(segundos):
-    """Convierte segundos a un string legible HH:MM:SS o MM:SS."""
     segundos = max(0, int(segundos))
     horas, resto = divmod(segundos, 3600)
     mins, segs = divmod(resto, 60)
@@ -157,14 +145,12 @@ def formatear_tiempo(segundos):
 
 
 class CaptivePortalCLI:
-    """Interfaz de texto. Misma UX que portal_cautivo.py original, pero ahora habla con el servidor por HTTP en vez de llamar directo a la lógica de negocio.
-    """
 
     def __init__(self, client, host_servidor):
         self.client = client
         self.ip_local = obtener_ip_local(host_servidor)
 
-    # Menu
+    # ── Menú principal ────────────────────────────────────────────────────
     def _mostrar_menu_principal(self):
         print("\n")
         print(Config.SEP)
@@ -187,29 +173,24 @@ class CaptivePortalCLI:
             print(".", end="", flush=True)
         print()
 
-    # Formulario de ingreso para Estudiantes, Docentes y Admin TI
-
+    # ── Login normal ──────────────────────────────────────────────────────
     def login(self):
         print("\n")
         print(Config.SEP)
         print(f"  IP local    : {self.ip_local}  (VLAN {Config.VLAN_CUARENTENA} — cuarentena)")
         print("  Ingresa tus credenciales PUCP para acceder a la red")
         print(Config.SEP2)
-
         try:
-            codigo = input("  Código PUCP : ").strip()
+            codigo   = input("  Código PUCP : ").strip()
             password = input("  Contraseña  : ").strip()
         except KeyboardInterrupt:
             print("\n\n  Sesión cancelada.")
             return
-
         if not codigo or not password:
             print("  [!] Ingresa código PUCP y contraseña.\n")
             return
-
         self._animacion_autenticando()
         resultado = self.client.login(codigo, password)
-
         if resultado.get("ok"):
             print(Config.SEP)
             print("  ✓ ACCESO CONCEDIDO")
@@ -226,11 +207,8 @@ class CaptivePortalCLI:
             print(Config.SEP)
             input("  Presiona Enter para volver...")
 
+    # ── Recursos sesión ───────────────────────────────────────────────────
     def _mostrar_recursos_sesion(self, nombre_rol, vlan_id):
-        """
-        Vista de recursos para la sesión activa actual, separados por tabla de origen: T2 (rol principal) y T3 (excepción temporal).
-        Si una sección no tiene recursos, se imprime su encabezado igual, con la leyenda "No hay recursos permitidos" en lugar de la tabla.
-        """
         print("\n")
         print(Config.SEP)
         print(f"  Recursos permitidos - {nombre_rol}  (VLAN {vlan_id})")
@@ -239,106 +217,24 @@ class CaptivePortalCLI:
         if not resp.get("ok"):
             resp = self.client.recursos(nombre_rol)
         recursos = resp.get("recursos", []) if resp.get("ok") else []
-
-        for tabla, titulo in (("T2", "T2 / Rol principal"),
-                            ("T3", "T3 / Excepcion")):
+        for tabla, titulo in (("T2", "T2 / Rol principal"), ("T3", "T3 / Excepcion")):
             items = [r for r in recursos if r.get("tabla", "T2") == tabla]
             print(f"  {titulo}")
             if not items:
-                print("  No hay recursos permitidos")
+                print("  No hay recursos permitidos para esta tabla.")
             else:
-                print(f"  {'RECURSO':<28} {'IP DESTINO':<16} "
-                    f"{'PUERTO':>6}  {'PROTO':<5}")
+                print(f"  {'RECURSO':<28} {'IP DESTINO':<16} {'PUERTO':>6}  {'PROTO':<5}")
                 print("  " + Config.SEP2)
                 for r in items:
                     print(f"  {r.get('nombre_recurso',''):<28} "
-                        f"{r.get('ip_dst',''):<16} "
-                        f"{str(r.get('puerto','')):>6}  "
-                        f"{r.get('protocolo',''):<5}")
+                          f"{r.get('ip_dst',''):<16} "
+                          f"{str(r.get('puerto','')):>6}  "
+                          f"{r.get('protocolo',''):<5}")
             print()
         print(Config.SEP)
         input("  Presiona Enter para volver...")
-        
-    # M5 logs y eventos/métricas
-    def _admin_logs(self):
-        print("\n")
-        print(Config.SEP)
-        print("        LOGS DE AUDITORÍA — M5")
-        print(Config.SEP)
-        print("  Filtrar por evento (Enter para ver todos):")
-        print("  login_exitoso | login_fallido | cuenta_bloqueada")
-        print("  logout | visitante_acceso | jp_solicitado")
-        print("  jp_aprobado | jp_rechazado | jp_revocado")
-        print(Config.SEP2)
-        try:
-            evento = input("  Evento (Enter=todos): ").strip() or None
-            usuario = input("  Usuario (Enter=todos): ").strip() or None
-            limite = input("  Últimos N registros (Enter=50): ").strip()
-            limite = int(limite) if limite.isdigit() else 50
-        except KeyboardInterrupt:
-            print("\n\n  Cancelado.")
-            return
 
-        resultado = self.client.m5_logs(evento=evento, usuario=usuario, limite=limite)
-        if not resultado.get("ok"):
-            print(f"  ✗ {resultado.get('motivo', 'Error al obtener logs')}")
-            print(Config.SEP)
-            input("  Presiona Enter para volver...")
-            return
-
-        logs = resultado.get("logs", [])
-        print("\n")
-        print(Config.SEP)
-        print(f"  LOGS DE AUDITORÍA  (total: {resultado.get('total', 0)})")
-        print(Config.SEP)
-        if not logs:
-            print("  No hay registros.")
-        else:
-            print(f"  {'TIMESTAMP':<20} {'SEVERIDAD':<9} {'EVENTO':<20} "
-                  f"{'USUARIO':<14} {'ROL':<22} {'MS':>5}")
-            print("  " + Config.SEP2)
-            for log in logs:
-                sev = log.get("severidad", "INFO")
-                sev_icon = {"INFO": "✓", "WARNING": "⚠", "ERROR": "✗"}.get(sev, " ")
-                print(f"  {str(log.get('timestamp','')):<20} "
-                      f"{sev_icon} {sev:<7} "
-                      f"{log.get('evento',''):<20} "
-                      f"{str(log.get('usuario','')):<14} "
-                      f"{str(log.get('rol','')):<22} "
-                      f"{str(log.get('duracion_ms') or '')!s:>5}")
-        print(Config.SEP)
-        input("  Presiona Enter para volver...")
-
-    def _admin_metricas(self):
-        print("\n")
-        print(Config.SEP)
-        print("        MÉTRICAS DEL SISTEMA — M5")
-        print(Config.SEP)
-        resultado = self.client.m5_metricas()
-        if not resultado.get("ok"):
-            print(f"  ✗ {resultado.get('motivo', 'Error al obtener métricas')}")
-            print(Config.SEP)
-            input("  Presiona Enter para volver...")
-            return
-
-        print(f"  Tasa de bloqueo          : {resultado.get('tasa_bloqueo_pct', 0):.2f}%")
-        print(f"  Latencia promedio RADIUS : {resultado.get('latencia_promedio_ms') or 'N/A'} ms")
-        print(f"  Latencia mínima          : {resultado.get('latencia_min_ms') or 'N/A'} ms")
-        print(f"  Latencia máxima          : {resultado.get('latencia_max_ms') or 'N/A'} ms")
-        print(f"  Logins por segundo       : {resultado.get('logins_por_segundo') or 'N/A'}")
-        print(f"  Roles soportados         : {resultado.get('total_roles', 0)}")
-        print(Config.SEP2)
-        print(f"  {'EVENTO':<25} {'SEVERIDAD':<10} {'TOTAL':>6}")
-        print("  " + Config.SEP2)
-        for ev in resultado.get("eventos_por_tipo", []):
-            print(f"  {ev.get('evento',''):<25} "
-                  f"{ev.get('severidad',''):<10} "
-                  f"{ev.get('total',0):>6}")
-        print(Config.SEP)
-        input("  Presiona Enter para volver...")
-
-    # ── JP: postulación (estudiante) ─────────────────────────────────────
-
+    # ── JP: estudiante ────────────────────────────────────────────────────
     def _postular_jp(self):
         print("\n")
         print(Config.SEP)
@@ -364,9 +260,8 @@ class CaptivePortalCLI:
             print("  Opción no válida.\n")
             input("  Presiona Enter para volver...")
             return
-
         carrera_jp = Config.CARRERAS_JP[idx]
-        resultado = self.client.jp_solicitar(carrera_jp)
+        resultado  = self.client.jp_solicitar(carrera_jp)
         print("\n")
         print(Config.SEP)
         if resultado.get("ok"):
@@ -386,10 +281,10 @@ class CaptivePortalCLI:
         print(Config.SEP)
         print("        HISTORIAL DE POSTULACIONES JP")
         print(Config.SEP)
-        resultado = self.client.jp_historial()
-        solicitudes = resultado.get("solicitudes", []) if resultado.get("ok") else []
+        resultado    = self.client.jp_historial()
+        solicitudes  = resultado.get("solicitudes", []) if resultado.get("ok") else []
         if not solicitudes:
-            print("  No tienes postulaciones registradas.")
+            print("  No tienes postulaciones registradas aún.")
         else:
             print(f"  {'ID':<4} {'CARRERA':<26} {'ESTADO':<12} {'FECHA SOLICITUD':<20}")
             print("  " + Config.SEP2)
@@ -401,14 +296,8 @@ class CaptivePortalCLI:
         print(Config.SEP)
         input("  Presiona Enter para volver...")
 
-    # ── JP: administración (Admin_TI) ────────────────────────────────────
-
+    # ── JP: Admin_TI ──────────────────────────────────────────────────────
     def _pedir_fecha_expiracion(self):
-        """
-        Pide a Admin_TI la fecha de expiracion del permiso JP a otorgar.
-        Formato esperado: YYYY-MM-DD (la hora se fija a 23:59:59).
-        Devuelve None si se cancela o el formato es invalido.
-        """
         print(Config.SEP2)
         print("  Fecha de expiracion del permiso JP (formato: AAAA-MM-DD)")
         print("  Ejemplo: 2026-12-15")
@@ -431,14 +320,13 @@ class CaptivePortalCLI:
         print(Config.SEP)
         print("        SOLICITUDES JP — PENDIENTES")
         print(Config.SEP)
-        resultado = self.client.jp_solicitudes("PENDIENTE")
+        resultado   = self.client.jp_solicitudes("PENDIENTE")
         solicitudes = resultado.get("solicitudes", []) if resultado.get("ok") else []
         if not solicitudes:
-            print("  No hay solicitudes pendientes.")
+            print("  No hay solicitudes JP pendientes en este momento.")
             print(Config.SEP)
             input("  Presiona Enter para volver...")
             return
-
         print(f"  {'ID':<4} {'CODIGO PUCP':<14} {'CARRERA JP':<26} {'FECHA':<20}")
         print("  " + Config.SEP2)
         for s in solicitudes:
@@ -462,10 +350,9 @@ class CaptivePortalCLI:
             input("  Presiona Enter para volver...")
             return
         if id_solicitud not in [s.get("id_solicitud") for s in solicitudes]:
-            print("  Ese ID no esta en la lista de pendientes.\n")
+            print("  Ese ID no está en la lista de pendientes.\n")
             input("  Presiona Enter para volver...")
             return
-
         print(Config.SEP2)
         print("  [1] Aprobar")
         print("  [2] Rechazar")
@@ -475,11 +362,9 @@ class CaptivePortalCLI:
         except KeyboardInterrupt:
             print("\n\n  Cancelado.")
             return
-
         accion = {"1": "APROBAR", "2": "RECHAZAR"}.get(accion_op)
         if not accion:
             return
-
         expiration = None
         if accion == "APROBAR":
             expiration = self._pedir_fecha_expiracion()
@@ -487,12 +372,11 @@ class CaptivePortalCLI:
                 print("  Aprobacion cancelada (sin fecha de expiracion).\n")
                 input("  Presiona Enter para volver...")
                 return
-
         resultado = self.client.jp_resolver(id_solicitud, accion, expiration=expiration)
         print("\n")
         print(Config.SEP)
         if resultado.get("ok"):
-            print(f"  ✓ Solicitud {id_solicitud} -> {resultado.get('estado')}")
+            print(f"  ✓ Solicitud {id_solicitud} → {resultado.get('estado')}")
             if resultado.get("recursos_otorgados"):
                 print(f"  Recursos otorgados (id_recurso): {resultado['recursos_otorgados']}")
                 print(f"  Expira: {expiration}")
@@ -506,14 +390,13 @@ class CaptivePortalCLI:
         print(Config.SEP)
         print("        SOLICITUDES JP — APROBADAS (revocar)")
         print(Config.SEP)
-        resultado = self.client.jp_solicitudes("APROBADA")
+        resultado   = self.client.jp_solicitudes("APROBADA")
         solicitudes = resultado.get("solicitudes", []) if resultado.get("ok") else []
         if not solicitudes:
-            print("  No hay solicitudes aprobadas activas.")
+            print("  No hay permisos JP aprobados activos en este momento.")
             print(Config.SEP)
             input("  Presiona Enter para volver...")
             return
-
         print(f"  {'ID':<4} {'CODIGO PUCP':<14} {'CARRERA JP':<26} {'FECHA':<20}")
         print("  " + Config.SEP2)
         for s in solicitudes:
@@ -537,47 +420,121 @@ class CaptivePortalCLI:
             input("  Presiona Enter para volver...")
             return
         if id_solicitud not in [s.get("id_solicitud") for s in solicitudes]:
-            print("  Ese ID no esta en la lista de aprobadas.\n")
+            print("  Ese ID no está en la lista de aprobadas.\n")
             input("  Presiona Enter para volver...")
             return
-
         try:
-            motivo = input("  Motivo de revocacion (opcional): ").strip() or None
+            motivo = input("  Motivo de revocacion (opcional, Enter para omitir): ").strip() or None
         except KeyboardInterrupt:
             print("\n\n  Cancelado.")
             return
-
         resultado = self.client.jp_resolver(id_solicitud, "REVOCAR", motivo=motivo)
         print("\n")
         print(Config.SEP)
         if resultado.get("ok"):
-            print(f"  ✓ Solicitud {id_solicitud} -> {resultado.get('estado')}")
+            print(f"  ✓ Solicitud {id_solicitud} → {resultado.get('estado')}")
         else:
             print(f"  ✗ {resultado.get('motivo', 'No se pudo revocar la solicitud')}")
         print(Config.SEP)
         input("  Presiona Enter para volver...")
 
+    # ── M5: logs y métricas (Admin_TI) ────────────────────────────────────
+    def _admin_logs(self):
+        print("\n")
+        print(Config.SEP)
+        print("        LOGS DE AUDITORÍA — M5")
+        print(Config.SEP)
+        print("  Filtrar por evento (Enter para ver todos):")
+        print("  login_exitoso | login_fallido | cuenta_bloqueada")
+        print("  logout | visitante_acceso | jp_solicitado")
+        print("  jp_aprobado | jp_rechazado | jp_revocado")
+        print(Config.SEP2)
+        try:
+            evento  = input("  Evento  (Enter=todos): ").strip() or None
+            usuario = input("  Usuario (Enter=todos): ").strip() or None
+            limite  = input("  Últimos N registros  (Enter=50): ").strip()
+            limite  = int(limite) if limite.isdigit() else 50
+        except KeyboardInterrupt:
+            print("\n\n  Cancelado.")
+            return
+        resultado = self.client.m5_logs(evento=evento, usuario=usuario, limite=limite)
+        print("\n")
+        print(Config.SEP)
+        if not resultado.get("ok"):
+            print(f"  ✗ No se pudieron obtener los logs.")
+            print(f"    Detalle: {resultado.get('motivo', 'M5 no disponible')}")
+            print(Config.SEP)
+            input("  Presiona Enter para volver...")
+            return
+        logs = resultado.get("logs", [])
+        print(f"  LOGS DE AUDITORÍA  (mostrando: {len(logs)} / total: {resultado.get('total', 0)})")
+        print(Config.SEP)
+        if not logs:
+            print("  No hay registros que coincidan con el filtro aplicado.")
+        else:
+            print(f"  {'TIMESTAMP':<20} {'SEV':<9} {'EVENTO':<20} "
+                  f"{'USUARIO':<14} {'ROL':<22} {'MS':>5}")
+            print("  " + Config.SEP2)
+            for log in logs:
+                sev      = log.get("severidad", "INFO")
+                sev_icon = {"INFO": "✓", "WARNING": "⚠", "ERROR": "✗"}.get(sev, " ")
+                print(f"  {str(log.get('timestamp','')):<20} "
+                      f"{sev_icon} {sev:<7} "
+                      f"{log.get('evento',''):<20} "
+                      f"{str(log.get('usuario') or ''):<14} "
+                      f"{str(log.get('rol') or ''):<22} "
+                      f"{str(log.get('duracion_ms') or ''):>5}")
+        print(Config.SEP)
+        input("  Presiona Enter para volver...")
+
+    def _admin_metricas(self):
+        print("\n")
+        print(Config.SEP)
+        print("        MÉTRICAS DEL SISTEMA — M5")
+        print(Config.SEP)
+        resultado = self.client.m5_metricas()
+        if not resultado.get("ok"):
+            print(f"  ✗ No se pudieron obtener las métricas.")
+            print(f"    Detalle: {resultado.get('motivo', 'M5 no disponible')}")
+            print(Config.SEP)
+            input("  Presiona Enter para volver...")
+            return
+        lat_prom = resultado.get('latencia_promedio_ms')
+        lat_min  = resultado.get('latencia_min_ms')
+        lat_max  = resultado.get('latencia_max_ms')
+        lps      = resultado.get('logins_por_segundo')
+        print(f"  Tasa de bloqueo          : {resultado.get('tasa_bloqueo_pct', 0):.2f}%")
+        print(f"  Latencia promedio RADIUS : {f'{lat_prom} ms' if lat_prom is not None else 'Sin datos aún'}")
+        print(f"  Latencia mínima          : {f'{lat_min} ms' if lat_min is not None else 'Sin datos aún'}")
+        print(f"  Latencia máxima          : {f'{lat_max} ms' if lat_max is not None else 'Sin datos aún'}")
+        print(f"  Logins por segundo       : {lps if lps is not None else 'Sin datos aún'}")
+        print(f"  Roles soportados         : {resultado.get('total_roles', 0)}")
+        print(Config.SEP2)
+        eventos = resultado.get("eventos_por_tipo", [])
+        if not eventos:
+            print("  No hay eventos registrados aún.")
+        else:
+            print(f"  {'EVENTO':<25} {'SEVERIDAD':<10} {'TOTAL':>6}")
+            print("  " + Config.SEP2)
+            for ev in eventos:
+                print(f"  {ev.get('evento',''):<25} "
+                      f"{ev.get('severidad',''):<10} "
+                      f"{ev.get('total',0):>6}")
+        print(Config.SEP)
+        input("  Presiona Enter para volver...")
+
+    # ── Sesión activa ─────────────────────────────────────────────────────
     def _sesion_activa(self, sesion):
-        """
-        Menú de sesión activa (estudiante/docente/admin/visitante).
-        Calcula y muestra en vivo el tiempo restante antes del cierre automático, basado en session_timeout (segundos): 
-        para usuarios normales viene del atributo Session-Timeout de FreeRADIUS; para visitantes es el valor fijo de 1800s (30 min) que envía el servidor.
-
-        Si el rol es Estudiante_* se agregan las opciones de postular a JP y ver su historial. Si el rol es Admin_TI se agregan las
-        opciones de revisar solicitudes pendientes y revocar permisos otorgados.
-
-        Si el usuario no elige nada antes de que el tiempo se agote, la sesión se cierra sola.
-        """
-        codigo_pucp = sesion.get("codigo_pucp") or sesion.get("correo") or "VISITANTE"
-        nombre_rol = sesion.get("nombre_rol")
-        vlan_id = sesion.get("vlan_id")
-        ip_asignada = sesion.get("ip_asignada")
-        mac = sesion.get("mac") or sesion.get("mac_address")
-        id_usuario = sesion.get("id_usuario", 0)
-        es_visitante = sesion.get("es_visitante", False)
+        codigo_pucp    = sesion.get("codigo_pucp") or sesion.get("correo") or "VISITANTE"
+        nombre_rol     = sesion.get("nombre_rol")
+        vlan_id        = sesion.get("vlan_id")
+        ip_asignada    = sesion.get("ip_asignada")
+        mac            = sesion.get("mac") or sesion.get("mac_address")
+        id_usuario     = sesion.get("id_usuario", 0)
+        es_visitante   = sesion.get("es_visitante", False)
         session_timeout = sesion.get("session_timeout", 28800)
 
-        es_admin = (nombre_rol == "Admin_TI")
+        es_admin      = (nombre_rol == "Admin_TI")
         es_estudiante = nombre_rol in (
             "Estudiante_Telecom", "Estudiante_Informatica", "Estudiante_Electronica"
         )
@@ -613,9 +570,9 @@ class CaptivePortalCLI:
             print(f"  Rol           : {nombre_rol}")
             print(f"  VLAN          : {vlan_id}")
             print(f"  IP asignada   : {ip_asignada}")
-            print(f"  Tiempo rest.  : {formatear_tiempo(restante)} "
-                  f"(antes de cierre automático)")
+            print(f"  Tiempo rest.  : {formatear_tiempo(restante)} (antes de cierre automático)")
             print(Config.SEP2)
+
             opciones_validas = {"1"}
             print("  [1] Ver recursos permitidos")
             if es_estudiante:
@@ -656,21 +613,25 @@ class CaptivePortalCLI:
                 self._cerrar_sesion_activa(mac, id_usuario, codigo_pucp, ip_asignada, es_visitante)
                 return
 
+            elif opcion == "3" and es_estudiante:
+                self._historial_jp()
             elif opcion == "3" and es_admin:
                 self._admin_jp_revocar()
+
             elif opcion == "4" and es_admin:
                 self._admin_logs()
-            elif opcion == "5" and es_admin:
-                self._admin_metricas()
             elif opcion == "4" and es_estudiante:
                 self._cerrar_sesion_activa(mac, id_usuario, codigo_pucp, ip_asignada, es_visitante)
                 return
+
+            elif opcion == "5" and es_admin:
+                self._admin_metricas()
+
             elif opcion == "6" and es_admin:
                 self._cerrar_sesion_activa(mac, id_usuario, codigo_pucp, ip_asignada, es_visitante)
                 return
 
-    def _cerrar_sesion_activa(self, mac, id_usuario, codigo_pucp,
-                               ip_asignada, es_visitante):
+    def _cerrar_sesion_activa(self, mac, id_usuario, codigo_pucp, ip_asignada, es_visitante):
         print("\n")
         print(Config.SEP)
         print("  Cerrando sesión...")
@@ -684,9 +645,8 @@ class CaptivePortalCLI:
             print(f"  ⚠  {resp.get('motivo', 'No se pudo cerrar sesión')}")
         print(Config.SEP)
         input("  Presiona Enter para volver al menú principal...")
-                
-    # Formulario de ingreso para Visitante
 
+    # ── Visitante ─────────────────────────────────────────────────────────
     def flujo_visitante(self):
         print("\n")
         print(Config.SEP)
@@ -695,22 +655,18 @@ class CaptivePortalCLI:
         print("  Acceso temporal de 30 minutos.")
         print("  Solo disponible: internet externo")
         print(Config.SEP2)
-
         try:
-            correo = input("  Correo    : ").strip()
+            correo   = input("  Correo    : ").strip()
             password = input("  Contraseña: ").strip()
         except KeyboardInterrupt:
             print("\n\n  Cancelado.")
             return
-
         if not correo or not password:
             print("  [!] Ingresa correo y contraseña.")
             input("  Presiona Enter para volver...")
             return
-
         self._animacion_autenticando()
         resultado = self.client.login_visitante(correo, password)
-
         if resultado.get("ok"):
             print(f"  ✓ Sesión registrada — 30 minutos de acceso")
             self._sesion_activa(resultado)
@@ -725,21 +681,19 @@ class CaptivePortalCLI:
             print(Config.SEP)
             input("  Presiona Enter para volver...")
 
-    # El loop del menú para que sea interactivo
+    # ── Loop principal ────────────────────────────────────────────────────
     def run(self):
         while True:
             estado = self.client.sesion_actual()
             if estado.get("ok") and estado.get("activa") and estado.get("sesion"):
                 self._sesion_activa(estado["sesion"])
                 continue
-
             self._mostrar_menu_principal()
             try:
                 opcion = input("  Opción: ").strip()
             except KeyboardInterrupt:
                 print("\n  Saliendo del portal.\n")
                 sys.exit(0)
-
             if opcion == "1":
                 self.login()
             elif opcion == "2":
@@ -754,14 +708,12 @@ class CaptivePortalCLI:
 def main():
     parser = argparse.ArgumentParser(description="Cliente CLI del Portal Cautivo PUCP")
     parser.add_argument("--host", default="192.168.100.110", help="IP del servidor del portal cautivo (VM-Auth)")
-    parser.add_argument("--port", default="8282", help="Puerto del servidor del portal cautivo")
+    parser.add_argument("--port", default="8282",  help="Puerto del servidor del portal cautivo")
     args = parser.parse_args()
-
     if not REQUESTS_OK:
         sys.exit(1)
-
     base_url = f"http://{args.host}:{args.port}"
-    client = PortalClient(base_url)
+    client   = PortalClient(base_url)
     CaptivePortalCLI(client, args.host).run()
 
 
