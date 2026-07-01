@@ -9,7 +9,8 @@ Ejecutar en VM-Auth: python3 -u web.py
 from flask import Flask, request, jsonify, render_template_string
 
 from m1_auth import Config, autenticar, autenticar_visitante, cerrar_sesion, \
-    obtener_recursos_permitidos, obtener_sesion_actual, obtener_recursos_sesion
+    obtener_recursos_permitidos, obtener_sesion_actual, obtener_recursos_sesion, \
+    solicitar_jp, historial_jp, listar_solicitudes_jp, resolver_solicitud_jp
 
 app = Flask(__name__)
 
@@ -218,6 +219,91 @@ def auth_recursos(nombre_rol):
     """
     recursos = obtener_recursos_permitidos(nombre_rol)
     return jsonify({"ok": True, "nombre_rol": nombre_rol, "recursos": recursos}), 200
+
+
+# Lgógica para JP / Multi-rol 
+
+@app.route("/jp/solicitar", methods=["POST"])
+def jp_solicitar():
+    """
+    POST /jp/solicitar
+    Content-Type: application/json
+    {"carrera_jp": "Estudiante_Telecom"}
+
+    El codigo_pucp/id_usuario se resuelve SIEMPRE desde la sesion activa
+    (por IP del request), nunca se recibe en el body.
+    """
+    data = request.get_json(silent=True) or {}
+    carrera_jp = (data.get("carrera_jp") or "").strip()
+    if not carrera_jp:
+        return jsonify({"ok": False, "motivo": "falta campo: carrera_jp"}), 400
+    resultado = solicitar_jp(request.remote_addr, carrera_jp)
+    return jsonify(resultado), (200 if resultado.get("ok") else 400)
+
+
+@app.route("/jp/historial", methods=["GET"])
+def jp_historial():
+    """Historial de postulaciones JP del usuario de la sesion activa."""
+    resultado = historial_jp(request.remote_addr)
+    return jsonify(resultado), (200 if resultado.get("ok") else 404)
+
+
+@app.route("/jp/solicitudes", methods=["GET"])
+def jp_solicitudes():
+    """
+    GET /jp/solicitudes?estado=PENDIENTE
+    Uso exclusivo de Admin_TI. estado=TODAS lista sin filtro.
+
+    Se valida server-side que la sesion activa del solicitante sea
+    Admin_TI — no basta con que cli.py oculte la opcion del menu.
+    """
+    estado = obtener_sesion_actual(request.remote_addr)
+    if not estado.get("activa"):
+        return jsonify({"ok": False, "motivo": "No hay sesion activa."}), 401
+    if estado["sesion"].get("nombre_rol") != "Admin_TI":
+        return jsonify({"ok": False, "motivo": "Solo Admin_TI puede ver las solicitudes JP."}), 403
+
+    filtro = request.args.get("estado", "PENDIENTE")
+    if filtro.upper() == "TODAS":
+        filtro = None
+    resultado = listar_solicitudes_jp(filtro)
+    return jsonify(resultado), (200 if resultado.get("ok") else 500)
+
+
+@app.route("/jp/resolver", methods=["POST"])
+def jp_resolver():
+    """
+    POST /jp/resolver
+    Content-Type: application/json
+    {"id_solicitud": 3, "accion": "APROBAR", "expiration": "2026-12-31 23:59:59", "motivo": null}
+
+    El id_admin se resuelve desde la sesion activa del que hace el
+    request (debe ser Admin_TI). accion: APROBAR | RECHAZAR | REVOCAR
+    expiration es obligatorio solo cuando accion='APROBAR'
+    (formato 'YYYY-MM-DD HH:MM:SS'); resolver_solicitud_jp valida esto
+    internamente y responde FALTA_EXPIRATION si falta.
+    """
+    data = request.get_json(silent=True) or {}
+    id_solicitud = data.get("id_solicitud")
+    accion = (data.get("accion") or "").strip().upper()
+    expiration = data.get("expiration")
+    motivo = data.get("motivo")
+
+    if not id_solicitud or accion not in ("APROBAR", "RECHAZAR", "REVOCAR"):
+        return jsonify({"ok": False, "motivo": "faltan campos: id_solicitud, accion valida"}), 400
+
+    estado = obtener_sesion_actual(request.remote_addr)
+    if not estado.get("activa"):
+        return jsonify({"ok": False, "motivo": "No hay sesion activa."}), 401
+    sesion = estado["sesion"]
+    if sesion.get("nombre_rol") != "Admin_TI":
+        return jsonify({"ok": False, "motivo": "Solo Admin_TI puede resolver solicitudes JP."}), 403
+
+    resultado = resolver_solicitud_jp(
+        id_solicitud, sesion.get("id_usuario"), accion,
+        expiration=expiration, motivo=motivo,
+    )
+    return jsonify(resultado), (200 if resultado.get("ok") else 400)
 
 
 if __name__ == "__main__":
