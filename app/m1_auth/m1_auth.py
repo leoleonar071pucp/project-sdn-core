@@ -94,7 +94,7 @@ class Config:
     #   - No se llama a resolver_host() ni emitir_token()
     #   - Se usan mac/switch_dpid/in_port "dummy" para poder seguir
     #     probando el registro en sesiones_activas / ip_mac_binding
-    M6_HABILITADO = False
+    M6_HABILITADO = True
 
     # Valores dummy usados solo cuando M6_HABILITADO = False
     MAC_DUMMY         = "00:00:00:00:00:01"
