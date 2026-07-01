@@ -26,6 +26,4 @@ services:
     depends_on:
       opa:
         condition: service_started
-
-volumes:
-  mysql_data:
+        
