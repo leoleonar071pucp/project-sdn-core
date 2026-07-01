@@ -1,36 +1,21 @@
 #!/usr/bin/env python3
 """
-web.py — Portal Cautivo Web (API JSON) — SDN PUCP
+webYO.py — Portal Cautivo Web (API JSON) — SDN PUCP
 Módulo M1 | Grupo 2 - TEL354
 - Sheila J 
 Ejecutar en VM-Auth: python3 -u web.py
 
-¡¡¡ MODO DE PRUEBA ACTUAL: Config.M6_HABILITADO = False en m1_auth.py !!!!
-Esto significa que /auth/login y /auth/visitante SÍ validan contra
-FreeRADIUS y SÍ registran en MySQL (sesiones_activas, ip_mac_binding,
-historial_sesiones), pero NO llaman a M6/ONOS — se usan mac/switch_dpid/
-in_port "dummy" en su lugar. Para activar la integración real con M6,
-cambia M6_HABILITADO = True en m1_auth.py.
-
-Sirve el formulario HTML y expone los endpoints de autenticación
-consumidos vía fetch()/JSON, según el contrato:
-
-    POST /auth/login
-    Content-Type: application/json
-    {"usuario": "20192434", "password": "..."}
-
-Toda la lógica real vive en m1_auth.py. Este archivo solo traduce
-HTTP <-> llamadas al núcleo, igual que cli.py traduce input()/print().
 """
 from flask import Flask, request, jsonify, render_template_string
 
 from m1_auth import Config, autenticar, autenticar_visitante, cerrar_sesion, \
-    obtener_recursos_permitidos
+    obtener_recursos_permitidos, obtener_sesion_actual, obtener_recursos_sesion, \
+    solicitar_jp, historial_jp, listar_solicitudes_jp, resolver_solicitud_jp
 
 app = Flask(__name__)
 
 HOST = "0.0.0.0"
-PORT = 8282  # coincide con el ejemplo: 192.168.100.100:8282
+PORT = 8282  # coincide con el ejemplo: 192.168.100.110:8282
 
 # HTML --> si hubiera interfaz grafica, se vería por ahi el formulario de ingreso :'v
 PAGE = """<!DOCTYPE html>
@@ -136,10 +121,8 @@ def auth_login():
 
     La IP real del cliente se toma de request.remote_addr.
 
-    La respuesta incluye "session_timeout" (segundos) cuando ok=true,
-    tomado del atributo Session-Timeout de FreeRADIUS para ese rol.
-    El cliente lo usa para mostrar la cuenta regresiva hasta el
-    cierre automático de sesión.
+    La respuesta incluye "session_timeout" (segundos) cuando ok=true, tomado del atributo Session-Timeout de FreeRADIUS para ese rol.
+    El cliente lo usa para mostrar la cuenta regresiva hasta el cierre automático de sesión.
     """
     data = request.get_json(silent=True) or {}
     usuario  = data.get("usuario", "").strip()
@@ -160,7 +143,7 @@ def auth_visitante():
     Content-Type: application/json
     {"correo": "...", "password": "..."}
 
-    La respuesta incluye "session_timeout" fijo en 1800s (30 min), regla de negocio para visitantes.
+    La respuesta incluye "session_timeout" fijo en 1800s (30 min), regla para visitantes.
     """
     data = request.get_json(silent=True) or {}
     correo   = data.get("correo", "").strip()
@@ -195,19 +178,132 @@ def auth_logout():
     return jsonify(resultado), (200 if resultado["ok"] else 404)
 
 
+@app.route("/auth/sesion/actual", methods=["GET"])
+def auth_sesion_actual():
+    """
+    GET /auth/sesion/actual
+
+    Resuelve la MAC del solicitante a partir de su IP (request.remote_addr) y consulta si existe una sesión activa para ese host en sesiones_activas.
+    Usado por cli.py al iniciar/reiniciar para resumir sesión sin pedir login otra vez si el host ya estaba autenticado.
+
+    Respuesta:
+      {"ok": true, "activa": false}
+      {"ok": true, "activa": true, "sesion": {...}}
+    """
+    resultado = obtener_sesion_actual(request.remote_addr)
+    return jsonify(resultado), (200 if resultado.get("ok") else 500)
+
+
+@app.route("/auth/sesion/recursos", methods=["GET"])
+def auth_sesion_recursos():
+    """
+    GET /auth/sesion/recursos
+
+    Devuelve los recursos permitidos para la sesión activa del solicitante (resuelta por IP), combinando T2 (reglas del rol,
+    politicas_rbac) y T3 (excepciones temporales del usuario, politicas_temporales, no expiradas). Si no hay sesión activa para esa IP, responde ok=false.
+
+    Respuesta:
+      {"ok": true, "sesion": {...}, "recursos": [...]}
+      {"ok": false, "motivo": "No hay sesion activa."}
+    """
+    resultado = obtener_recursos_sesion(request.remote_addr)
+    return jsonify(resultado), (200 if resultado.get("ok") else 404)
+
+
 @app.route("/auth/recursos/<nombre_rol>", methods=["GET"])
 def auth_recursos(nombre_rol):
     """
     GET /auth/recursos/<nombre_rol>
 
-    Devuelve la lista de recursos permitidos (ALLOW) para un rol,
-    leída directamente de politicas_rbac/recursos/servidores.
-    Es de SOLO LECTURA: no instala flows ni modifica nada en ONOS,
-    únicamente informa al usuario qué tiene acceso permitido según
-    su rol (lo que ve, no lo que aplica — eso es trabajo de M2/M6).
+    Devuelve la lista de recursos permitidos (ALLOW) para un rol, leída directamente de politicas_rbac/recursos/servidores.
     """
     recursos = obtener_recursos_permitidos(nombre_rol)
     return jsonify({"ok": True, "nombre_rol": nombre_rol, "recursos": recursos}), 200
+
+
+# Lgógica para JP / Multi-rol 
+
+@app.route("/jp/solicitar", methods=["POST"])
+def jp_solicitar():
+    """
+    POST /jp/solicitar
+    Content-Type: application/json
+    {"carrera_jp": "Estudiante_Telecom"}
+
+    El codigo_pucp/id_usuario se resuelve SIEMPRE desde la sesion activa
+    (por IP del request), nunca se recibe en el body.
+    """
+    data = request.get_json(silent=True) or {}
+    carrera_jp = (data.get("carrera_jp") or "").strip()
+    if not carrera_jp:
+        return jsonify({"ok": False, "motivo": "falta campo: carrera_jp"}), 400
+    resultado = solicitar_jp(request.remote_addr, carrera_jp)
+    return jsonify(resultado), (200 if resultado.get("ok") else 400)
+
+
+@app.route("/jp/historial", methods=["GET"])
+def jp_historial():
+    """Historial de postulaciones JP del usuario de la sesion activa."""
+    resultado = historial_jp(request.remote_addr)
+    return jsonify(resultado), (200 if resultado.get("ok") else 404)
+
+
+@app.route("/jp/solicitudes", methods=["GET"])
+def jp_solicitudes():
+    """
+    GET /jp/solicitudes?estado=PENDIENTE
+    Uso exclusivo de Admin_TI. estado=TODAS lista sin filtro.
+
+    Se valida server-side que la sesion activa del solicitante sea
+    Admin_TI — no basta con que cli.py oculte la opcion del menu.
+    """
+    estado = obtener_sesion_actual(request.remote_addr)
+    if not estado.get("activa"):
+        return jsonify({"ok": False, "motivo": "No hay sesion activa."}), 401
+    if estado["sesion"].get("nombre_rol") != "Admin_TI":
+        return jsonify({"ok": False, "motivo": "Solo Admin_TI puede ver las solicitudes JP."}), 403
+
+    filtro = request.args.get("estado", "PENDIENTE")
+    if filtro.upper() == "TODAS":
+        filtro = None
+    resultado = listar_solicitudes_jp(filtro)
+    return jsonify(resultado), (200 if resultado.get("ok") else 500)
+
+
+@app.route("/jp/resolver", methods=["POST"])
+def jp_resolver():
+    """
+    POST /jp/resolver
+    Content-Type: application/json
+    {"id_solicitud": 3, "accion": "APROBAR", "expiration": "2026-12-31 23:59:59", "motivo": null}
+
+    El id_admin se resuelve desde la sesion activa del que hace el
+    request (debe ser Admin_TI). accion: APROBAR | RECHAZAR | REVOCAR
+    expiration es obligatorio solo cuando accion='APROBAR'
+    (formato 'YYYY-MM-DD HH:MM:SS'); resolver_solicitud_jp valida esto
+    internamente y responde FALTA_EXPIRATION si falta.
+    """
+    data = request.get_json(silent=True) or {}
+    id_solicitud = data.get("id_solicitud")
+    accion = (data.get("accion") or "").strip().upper()
+    expiration = data.get("expiration")
+    motivo = data.get("motivo")
+
+    if not id_solicitud or accion not in ("APROBAR", "RECHAZAR", "REVOCAR"):
+        return jsonify({"ok": False, "motivo": "faltan campos: id_solicitud, accion valida"}), 400
+
+    estado = obtener_sesion_actual(request.remote_addr)
+    if not estado.get("activa"):
+        return jsonify({"ok": False, "motivo": "No hay sesion activa."}), 401
+    sesion = estado["sesion"]
+    if sesion.get("nombre_rol") != "Admin_TI":
+        return jsonify({"ok": False, "motivo": "Solo Admin_TI puede resolver solicitudes JP."}), 403
+
+    resultado = resolver_solicitud_jp(
+        id_solicitud, sesion.get("id_usuario"), accion,
+        expiration=expiration, motivo=motivo,
+    )
+    return jsonify(resultado), (200 if resultado.get("ok") else 400)
 
 
 if __name__ == "__main__":

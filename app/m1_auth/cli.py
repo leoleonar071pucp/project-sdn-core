@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """
-cli.py — Cliente CLI del Portal Cautivo — SDN PUCP
+cliYo.py — Cliente CLI del Portal Cautivo — SDN PUCP
 Módulo M1 | Grupo 2 - TEL354
 - Sheila J
-
-Corre en la máquina del usuario (host sin GUI en la VLAN de
-cuarentena). No contiene lógica de RADIUS/MySQL/M6: solo pide
-credenciales por consola, hace POST/GET HTTP al servidor (web.py
-en la VM-Auth) y muestra la respuesta con el mismo formato de
-menús que el portal_cautivo.py original.
 
 Endpoints reales consumidos (definidos en web.py):
   POST /auth/login            {"usuario": "...", "password": "..."}
@@ -17,6 +11,10 @@ Endpoints reales consumidos (definidos en web.py):
   GET  /auth/recursos/<rol>
   GET  /auth/sesion/actual
   GET  /auth/sesion/recursos
+  POST /jp/solicitar          {"carrera_jp": "..."}
+  GET  /jp/historial
+  GET  /jp/solicitudes?estado=PENDIENTE   (Admin_TI)
+  POST /jp/resolver           {"id_solicitud": N, "accion": "...",  "expiration": "YYYY-MM-DD HH:MM:SS", "motivo": "..."}  (Admin_TI)
 
 Requiere:
   pip3 install requests
@@ -43,13 +41,12 @@ class Config:
     SEP = "═" * 55
     SEP2 = "─" * 55
     VLAN_CUARENTENA = 90
+    CARRERAS_JP = ["Estudiante_Telecom", "Estudiante_Informatica", "Estudiante_Electronica"]
 
 
 def obtener_ip_local(host_servidor):
     """
-    Obtiene la IP real de ESTE equipo (el cliente), no la del servidor. Abre un socket UDP "falso" hacia el servidor (no envía datos, solo
-    fuerza al sistema operativo a elegir la interfaz de salida correcta) y lee la IP local que el OS asignó a esa conexión. Esto es lo más
-    cercano a "qué IP me ve el portal cautivo" sin depender de SSH_CLIENT, que solo existe en sesiones SSH.
+    Obtiene la IP real de ESTE equipo (el cliente), no la del servidor. Abre un socket UDP "falso" hacia el servidor y lee la IP local que el OS asignó a esa conexión. 
     """
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -72,9 +69,7 @@ class PortalClient:
             resp = requests.post(f"{self.base_url}{endpoint}", json=body, timeout=15)
             return resp.json()
         except requests.exceptions.ConnectionError:
-            return {"ok": False,
-                    "motivo": f"No se pudo conectar al portal cautivo "
-                              f"({self.base_url}). ¿Está corriendo web.py?"}
+            return {"ok": False, "motivo": f"No se pudo conectar al portal cautivo " f"({self.base_url}). ¿Está corriendo web.py?"}
         except requests.exceptions.Timeout:
             return {"ok": False, "motivo": "El portal cautivo no respondió a tiempo."}
         except Exception as e:
@@ -85,8 +80,7 @@ class PortalClient:
             resp = requests.get(f"{self.base_url}{endpoint}", timeout=15)
             return resp.json()
         except requests.exceptions.ConnectionError:
-            return {"ok": False, "motivo": f"No se pudo conectar al portal cautivo "
-                                            f"({self.base_url})."}
+            return {"ok": False, "motivo": f"No se pudo conectar al portal cautivo " f"({self.base_url})."}
         except Exception as e:
             return {"ok": False, "motivo": f"Error inesperado: {e}"}
 
@@ -111,6 +105,21 @@ class PortalClient:
 
     def recursos_sesion(self):
         return self._get("/auth/sesion/recursos")
+
+    def jp_solicitar(self, carrera_jp):
+        return self._post("/jp/solicitar", {"carrera_jp": carrera_jp})
+
+    def jp_historial(self):
+        return self._get("/jp/historial")
+
+    def jp_solicitudes(self, estado="PENDIENTE"):
+        return self._get(f"/jp/solicitudes?estado={estado}")
+
+    def jp_resolver(self, id_solicitud, accion, expiration=None, motivo=None):
+        return self._post("/jp/resolver", {
+            "id_solicitud": id_solicitud, "accion": accion,
+            "expiration": expiration, "motivo": motivo,
+        })
 
 
 def formatear_tiempo(segundos):
@@ -195,9 +204,8 @@ class CaptivePortalCLI:
 
     def _mostrar_recursos_sesion(self, nombre_rol, vlan_id):
         """
-        Vista de recursos para la sesión activa actual, separados por
-        tabla de origen: T2 (rol principal) y T3 (excepción temporal).
-        Si una sección no tiene recursos, simplemente no se imprime.
+        Vista de recursos para la sesión activa actual, separados por tabla de origen: T2 (rol principal) y T3 (excepción temporal).
+        Si una sección no tiene recursos, se imprime su encabezado igual, con la leyenda "No hay recursos permitidos" en lugar de la tabla.
         """
         print("\n")
         print(Config.SEP)
@@ -208,36 +216,256 @@ class CaptivePortalCLI:
             resp = self.client.recursos(nombre_rol)
         recursos = resp.get("recursos", []) if resp.get("ok") else []
 
-        if not recursos:
-            print("  Sin recursos definidos para esta sesion.")
-        else:
-            for tabla, titulo in (("T2", "T2 / Rol principal"),
-                                   ("T3", "T3 / Excepcion")):
-                items = [r for r in recursos if r.get("tabla", "T2") == tabla]
-                if not items:
-                    continue
-                print(f"  {titulo}")
+        for tabla, titulo in (("T2", "T2 / Rol principal"),
+                            ("T3", "T3 / Excepcion")):
+            items = [r for r in recursos if r.get("tabla", "T2") == tabla]
+            print(f"  {titulo}")
+            if not items:
+                print("  No hay recursos permitidos")
+            else:
                 print(f"  {'RECURSO':<28} {'IP DESTINO':<16} "
-                      f"{'PUERTO':>6}  {'PROTO':<5}")
+                    f"{'PUERTO':>6}  {'PROTO':<5}")
                 print("  " + Config.SEP2)
                 for r in items:
                     print(f"  {r.get('nombre_recurso',''):<28} "
-                          f"{r.get('ip_dst',''):<16} "
-                          f"{str(r.get('puerto','')):>6}  "
-                          f"{r.get('protocolo',''):<5}")
-                print()
+                        f"{r.get('ip_dst',''):<16} "
+                        f"{str(r.get('puerto','')):>6}  "
+                        f"{r.get('protocolo',''):<5}")
+            print()
+        print(Config.SEP)
+        input("  Presiona Enter para volver...")
+
+    # ── JP: postulación (estudiante) ─────────────────────────────────────
+
+    def _postular_jp(self):
+        print("\n")
+        print(Config.SEP)
+        print("        POSTULAR A JEFE DE PRACTICA (JP)")
+        print(Config.SEP)
+        print("  Elige la carrera para la que postulas:")
+        for i, carrera in enumerate(Config.CARRERAS_JP, start=1):
+            print(f"  [{i}] {carrera}")
+        print("  [0] Cancelar")
+        print(Config.SEP2)
+        try:
+            opcion = input("  Opción: ").strip()
+        except KeyboardInterrupt:
+            print("\n\n  Cancelado.")
+            return
+        if opcion == "0":
+            return
+        try:
+            idx = int(opcion) - 1
+            if idx < 0 or idx >= len(Config.CARRERAS_JP):
+                raise ValueError
+        except ValueError:
+            print("  Opción no válida.\n")
+            input("  Presiona Enter para volver...")
+            return
+
+        carrera_jp = Config.CARRERAS_JP[idx]
+        resultado = self.client.jp_solicitar(carrera_jp)
+        print("\n")
+        print(Config.SEP)
+        if resultado.get("ok"):
+            print("  ✓ SOLICITUD ENVIADA")
+            print(Config.SEP)
+            print(f"  Carrera     : {carrera_jp}")
+            print(f"  Id solicitud: {resultado.get('id_solicitud')}")
+            print(f"  Estado      : {resultado.get('estado')}")
+            print("  Espera la aprobacion de Admin_TI para obtener tus permisos.")
+        else:
+            print(f"  ✗ {resultado.get('motivo', 'No se pudo registrar la solicitud')}")
+        print(Config.SEP)
+        input("  Presiona Enter para volver...")
+
+    def _historial_jp(self):
+        print("\n")
+        print(Config.SEP)
+        print("        HISTORIAL DE POSTULACIONES JP")
+        print(Config.SEP)
+        resultado = self.client.jp_historial()
+        solicitudes = resultado.get("solicitudes", []) if resultado.get("ok") else []
+        if not solicitudes:
+            print("  No tienes postulaciones registradas.")
+        else:
+            print(f"  {'ID':<4} {'CARRERA':<26} {'ESTADO':<12} {'FECHA SOLICITUD':<20}")
+            print("  " + Config.SEP2)
+            for s in solicitudes:
+                print(f"  {s.get('id_solicitud',''):<4} "
+                      f"{s.get('carrera_jp',''):<26} "
+                      f"{s.get('estado',''):<12} "
+                      f"{str(s.get('fecha_solicitud','')):<20}")
+        print(Config.SEP)
+        input("  Presiona Enter para volver...")
+
+    # ── JP: administración (Admin_TI) ────────────────────────────────────
+
+    def _pedir_fecha_expiracion(self):
+        """
+        Pide a Admin_TI la fecha de expiracion del permiso JP a otorgar.
+        Formato esperado: YYYY-MM-DD (la hora se fija a 23:59:59).
+        Devuelve None si se cancela o el formato es invalido.
+        """
+        print(Config.SEP2)
+        print("  Fecha de expiracion del permiso JP (formato: AAAA-MM-DD)")
+        print("  Ejemplo: 2026-12-15")
+        try:
+            fecha = input("  Fecha (0 para cancelar): ").strip()
+        except KeyboardInterrupt:
+            print("\n\n  Cancelado.")
+            return None
+        if fecha == "0" or not fecha:
+            return None
+        try:
+            datetime.datetime.strptime(fecha, "%Y-%m-%d")
+        except ValueError:
+            print("  Formato de fecha invalido.\n")
+            return None
+        return f"{fecha} 23:59:59"
+
+    def _admin_jp_solicitudes(self):
+        print("\n")
+        print(Config.SEP)
+        print("        SOLICITUDES JP — PENDIENTES")
+        print(Config.SEP)
+        resultado = self.client.jp_solicitudes("PENDIENTE")
+        solicitudes = resultado.get("solicitudes", []) if resultado.get("ok") else []
+        if not solicitudes:
+            print("  No hay solicitudes pendientes.")
+            print(Config.SEP)
+            input("  Presiona Enter para volver...")
+            return
+
+        print(f"  {'ID':<4} {'CODIGO PUCP':<14} {'CARRERA JP':<26} {'FECHA':<20}")
+        print("  " + Config.SEP2)
+        for s in solicitudes:
+            print(f"  {s.get('id_solicitud',''):<4} "
+                  f"{s.get('codigo_pucp',''):<14} "
+                  f"{s.get('carrera_jp',''):<26} "
+                  f"{str(s.get('fecha_solicitud','')):<20}")
+        print(Config.SEP2)
+        print("  Ingresa el ID de la solicitud a resolver, o 0 para volver.")
+        try:
+            opcion = input("  ID solicitud: ").strip()
+        except KeyboardInterrupt:
+            print("\n\n  Cancelado.")
+            return
+        if opcion == "0" or not opcion:
+            return
+        try:
+            id_solicitud = int(opcion)
+        except ValueError:
+            print("  ID invalido.\n")
+            input("  Presiona Enter para volver...")
+            return
+        if id_solicitud not in [s.get("id_solicitud") for s in solicitudes]:
+            print("  Ese ID no esta en la lista de pendientes.\n")
+            input("  Presiona Enter para volver...")
+            return
+
+        print(Config.SEP2)
+        print("  [1] Aprobar")
+        print("  [2] Rechazar")
+        print("  [0] Cancelar")
+        try:
+            accion_op = input("  Opción: ").strip()
+        except KeyboardInterrupt:
+            print("\n\n  Cancelado.")
+            return
+
+        accion = {"1": "APROBAR", "2": "RECHAZAR"}.get(accion_op)
+        if not accion:
+            return
+
+        expiration = None
+        if accion == "APROBAR":
+            expiration = self._pedir_fecha_expiracion()
+            if not expiration:
+                print("  Aprobacion cancelada (sin fecha de expiracion).\n")
+                input("  Presiona Enter para volver...")
+                return
+
+        resultado = self.client.jp_resolver(id_solicitud, accion, expiration=expiration)
+        print("\n")
+        print(Config.SEP)
+        if resultado.get("ok"):
+            print(f"  ✓ Solicitud {id_solicitud} -> {resultado.get('estado')}")
+            if resultado.get("recursos_otorgados"):
+                print(f"  Recursos otorgados (id_recurso): {resultado['recursos_otorgados']}")
+                print(f"  Expira: {expiration}")
+        else:
+            print(f"  ✗ {resultado.get('motivo', 'No se pudo resolver la solicitud')}")
+        print(Config.SEP)
+        input("  Presiona Enter para volver...")
+
+    def _admin_jp_revocar(self):
+        print("\n")
+        print(Config.SEP)
+        print("        SOLICITUDES JP — APROBADAS (revocar)")
+        print(Config.SEP)
+        resultado = self.client.jp_solicitudes("APROBADA")
+        solicitudes = resultado.get("solicitudes", []) if resultado.get("ok") else []
+        if not solicitudes:
+            print("  No hay solicitudes aprobadas activas.")
+            print(Config.SEP)
+            input("  Presiona Enter para volver...")
+            return
+
+        print(f"  {'ID':<4} {'CODIGO PUCP':<14} {'CARRERA JP':<26} {'FECHA':<20}")
+        print("  " + Config.SEP2)
+        for s in solicitudes:
+            print(f"  {s.get('id_solicitud',''):<4} "
+                  f"{s.get('codigo_pucp',''):<14} "
+                  f"{s.get('carrera_jp',''):<26} "
+                  f"{str(s.get('fecha_solicitud','')):<20}")
+        print(Config.SEP2)
+        print("  Ingresa el ID de la solicitud a revocar, o 0 para volver.")
+        try:
+            opcion = input("  ID solicitud: ").strip()
+        except KeyboardInterrupt:
+            print("\n\n  Cancelado.")
+            return
+        if opcion == "0" or not opcion:
+            return
+        try:
+            id_solicitud = int(opcion)
+        except ValueError:
+            print("  ID invalido.\n")
+            input("  Presiona Enter para volver...")
+            return
+        if id_solicitud not in [s.get("id_solicitud") for s in solicitudes]:
+            print("  Ese ID no esta en la lista de aprobadas.\n")
+            input("  Presiona Enter para volver...")
+            return
+
+        try:
+            motivo = input("  Motivo de revocacion (opcional): ").strip() or None
+        except KeyboardInterrupt:
+            print("\n\n  Cancelado.")
+            return
+
+        resultado = self.client.jp_resolver(id_solicitud, "REVOCAR", motivo=motivo)
+        print("\n")
+        print(Config.SEP)
+        if resultado.get("ok"):
+            print(f"  ✓ Solicitud {id_solicitud} -> {resultado.get('estado')}")
+        else:
+            print(f"  ✗ {resultado.get('motivo', 'No se pudo revocar la solicitud')}")
         print(Config.SEP)
         input("  Presiona Enter para volver...")
 
     def _sesion_activa(self, sesion):
         """
-        Menú único de sesión activa (estudiante/docente/admin/visitante).
-        Calcula y muestra en vivo el tiempo restante antes del cierre
-        automático, basado en session_timeout (segundos): para usuarios
-        normales viene del atributo Session-Timeout de FreeRADIUS; para
-        visitantes es el valor fijo de 1800s (30 min) que envía el servidor.
+        Menú de sesión activa (estudiante/docente/admin/visitante).
+        Calcula y muestra en vivo el tiempo restante antes del cierre automático, basado en session_timeout (segundos): 
+        para usuarios normales viene del atributo Session-Timeout de FreeRADIUS; para visitantes es el valor fijo de 1800s (30 min) que envía el servidor.
 
-        Solo dos opciones: ver recursos permitidos o cerrar sesión.
+        Si el rol es Estudiante_* se agregan las opciones de postular a
+        JP y ver su historial. Si el rol es Admin_TI se agregan las
+        opciones de revisar solicitudes pendientes y revocar permisos
+        otorgados.
+
         Si el usuario no elige nada antes de que el tiempo se agote, la
         sesión se cierra sola.
         """
@@ -249,6 +477,11 @@ class CaptivePortalCLI:
         id_usuario = sesion.get("id_usuario", 0)
         es_visitante = sesion.get("es_visitante", False)
         session_timeout = sesion.get("session_timeout", 28800)
+
+        es_admin = (nombre_rol == "Admin_TI")
+        es_estudiante = nombre_rol in (
+            "Estudiante_Telecom", "Estudiante_Informatica", "Estudiante_Electronica"
+        )
 
         inicio = datetime.datetime.now()
         limite = inicio + datetime.timedelta(seconds=session_timeout)
@@ -285,6 +518,15 @@ class CaptivePortalCLI:
                   f"(antes de cierre automático)")
             print(Config.SEP2)
             print("  [1] Ver recursos permitidos")
+            opciones_validas = {"1", "2"}
+            if es_estudiante:
+                print("  [3] Postular a JP")
+                print("  [4] Historial de postulaciones JP")
+                opciones_validas |= {"3", "4"}
+            if es_admin:
+                print("  [3] Revisar solicitudes JP pendientes")
+                print("  [4] Revocar permisos JP otorgados")
+                opciones_validas |= {"3", "4"}
             print("  [2] Cerrar sesión")
             print(Config.SEP)
 
@@ -293,6 +535,10 @@ class CaptivePortalCLI:
             except KeyboardInterrupt:
                 print("\n\n  Saliendo del CLI. La sesión sigue activa.\n")
                 sys.exit(0)
+
+            if opcion not in opciones_validas:
+                print("  Opción no válida.\n")
+                continue
 
             if opcion == "1":
                 self._mostrar_recursos_sesion(nombre_rol, vlan_id)
@@ -312,8 +558,15 @@ class CaptivePortalCLI:
                 print(Config.SEP)
                 input("  Presiona Enter para volver al menú principal...")
                 return
-            else:
-                print("  Opción no válida.\n")
+
+            elif opcion == "3" and es_estudiante:
+                self._postular_jp()
+            elif opcion == "3" and es_admin:
+                self._admin_jp_solicitudes()
+            elif opcion == "4" and es_estudiante:
+                self._historial_jp()
+            elif opcion == "4" and es_admin:
+                self._admin_jp_revocar()
 
     # Formulario de ingreso para Visitante
 
@@ -356,7 +609,6 @@ class CaptivePortalCLI:
             input("  Presiona Enter para volver...")
 
     # El loop del menú para que sea interactivo
-
     def run(self):
         while True:
             estado = self.client.sesion_actual()
@@ -384,8 +636,7 @@ class CaptivePortalCLI:
 
 def main():
     parser = argparse.ArgumentParser(description="Cliente CLI del Portal Cautivo PUCP")
-    parser.add_argument("--host", default="192.168.100.110",
-                         help="IP del servidor del portal cautivo (VM-Auth)")
+    parser.add_argument("--host", default="192.168.100.110", help="IP del servidor del portal cautivo (VM-Auth)")
     parser.add_argument("--port", default="8282", help="Puerto del servidor del portal cautivo")
     args = parser.parse_args()
 
