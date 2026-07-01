@@ -206,14 +206,14 @@ INSERT INTO `politicas_rbac` (group_id, id_rol, id_recurso, prioridad) VALUES
 (1, 7, 12, 100);
 
 -- Grupo 4: Docente Y Admin_TI → recurso 11 (panel_admin_http)
-INSERT INTO politicas_rbac (group_id, id_rol, id_recurso, prioridad) VALUES
-(4, 6, 11, 100),  -- Docente
-(4, 7, 11, 100);  -- Admin_TI
+-- INSERT INTO politicas_rbac (group_id, id_rol, id_recurso, prioridad) VALUES
+-- (4, 6, 11, 100),  -- Docente
+-- (4, 7, 11, 100);  -- Admin_TI
 
 -- Grupo 5: Estudiante_Informatica Y Admin_TI → recurso 9 (notas_http)
-INSERT INTO politicas_rbac (group_id, id_rol, id_recurso, prioridad) VALUES
-(5, 4, 9, 100),  -- Estudiante_Informatica
-(5, 7, 9, 100);  -- Admin_TI
+-- INSERT INTO politicas_rbac (group_id, id_rol, id_recurso, prioridad) VALUES
+-- (5, 4, 9, 100),  -- Estudiante_Informatica
+-- (5, 7, 9, 100);  -- Admin_TI
 
 -- ============================================================
 -- TABLA: usuarios
@@ -245,10 +245,7 @@ INSERT INTO `usuarios` (codigo_pucp, password_hash, estado_cuenta) VALUES
 ('DOC20192020', SHA2('pass_doc1123',    256), 'ACTIVO'),
 ('DOC20192021', SHA2('pass_doc2123',    256), 'ACTIVO'),
 ('DOC20192022', SHA2('pass_doc3123',    256), 'ACTIVO'),
-('ADMIN001',    SHA2('pass_admin123',   256), 'ACTIVO'),
-('multi_teleco_docente', SHA2('pass_multi1', 256), 'ACTIVO'),
-('multi_info_admin',     SHA2('pass_multi2', 256), 'ACTIVO'),
-('multi_docente_admin',  SHA2('pass_multi3', 256), 'ACTIVO');
+('ADMIN001',    SHA2('pass_admin123',   256), 'ACTIVO');
 
 -- Se hace este cambio para el rol Visitante 
 -- 
@@ -296,7 +293,7 @@ CREATE TABLE IF NOT EXISTS `politicas_temporales` (
     `razon`     VARCHAR(255)     NULL DEFAULT NULL COMMENT 'Motivo de la excepcion temporal',   -- L: Para logs/auditoria y control de excepciones
     `ancho_banda` VARCHAR(20) DEFAULT '50Mbps',   -- L: Para meter
     `prioridad`  INT               NOT NULL DEFAULT '800',
-    `expiration` TIMESTAMP         NOT NULL COMMENT 'Cuando expira el permiso temporal',
+    `expiration` TIMESTAMP NOT NULL COMMENT 'Cuando expira el permiso temporal',
     `activo`     TINYINT(1)        NOT NULL DEFAULT '1',
     PRIMARY KEY (`id`),
     INDEX `id_recurso` (`id_recurso` ASC),
@@ -310,21 +307,51 @@ CREATE TABLE IF NOT EXISTS `politicas_temporales` (
   COLLATE=utf8mb4_unicode_ci;
 
 -- L:
-INSERT INTO politicas_temporales (id_usuario, id_recurso, allow, razon, ancho_banda, expiration) VALUES
-(1,7,true,'beca de colaboración','30Mbps','2026-06-30 23:59:59'),
-(2,8,false,'acceso revocado por directiva',NULL,'2026-07-30 23:59:59'),
-(3,3,true,'invitado a feria tecnológica',NULL,'2026-06-05 12:00:00');
--- multi_teleco_docente: denegación a cursos_telecom_https (recurso 4)
-INSERT INTO politicas_temporales (id_usuario, id_recurso, allow, razon, ancho_banda, expiration) VALUES
-(8, 4, false, 'Denegación por prueba multirol', NULL, '2026-12-31 23:59:59');
+-- INSERT INTO politicas_temporales (id_usuario, id_recurso, allow, razon, ancho_banda, expiration) VALUES
+-- (1,7,true,'beca de colaboración','30Mbps','2026-06-30 23:59:59'),
+-- (2,8,false,'acceso revocado por directiva',NULL,'2026-07-30 23:59:59');
 
--- multi_info_admin: permiso especial a notas_https (recurso 10) con ancho_banda extra
-INSERT INTO politicas_temporales (id_usuario, id_recurso, allow, razon, ancho_banda, expiration) VALUES
-(9, 10, true, 'Permiso con ancho_banda extra', '60Mbps', '2026-12-31 23:59:59');
+-- ============================================================
+-- TABLA: solicitudes_jp
+-- Postulaciones de estudiantes a Jefe de Practica (JP) de una carrera.
+-- El codigo_pucp del solicitante se resuelve siempre desde la sesion
+-- activa (M1), nunca se pide en el formulario.
+--
+-- Ciclo de estados:
+--   PENDIENTE  -> APROBADA   (Admin_TI aprueba; genera T3 en politicas_temporales)
+--   PENDIENTE  -> RECHAZADA  (Admin_TI rechaza; no genera nada)
+--   APROBADA   -> REVOCADA   (Admin_TI revoca manualmente, o se revoca
+--                              automaticamente al aprobarse una nueva
+--                              postulacion del mismo usuario)
+--
+-- Regla de unicidad aplicada en codigo (no en constraint SQL, porque
+-- el estado valido cambia con el tiempo): un usuario solo puede tener
+-- una solicitud en estado PENDIENTE o APROBADA a la vez.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `solicitudes_jp` (
+    `id_solicitud`      INT          NOT NULL AUTO_INCREMENT,
+    `id_usuario`        INT          NOT NULL COMMENT 'Estudiante que postula, resuelto desde la sesion activa',
+    `id_rol_facultad`   INT          NOT NULL COMMENT 'Carrera de JP a la que postula (FK a roles_facultad)',
+    `estado`            ENUM('PENDIENTE','APROBADA','RECHAZADA','REVOCADA') NOT NULL DEFAULT 'PENDIENTE',
+    `fecha_solicitud`   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `fecha_resolucion`  TIMESTAMP    NULL DEFAULT NULL COMMENT 'Cuando se aprobo/rechazo/revoco',
+    `id_admin_resuelve` INT          NULL DEFAULT NULL COMMENT 'Admin_TI que resolvio la solicitud',
+    `motivo_revocacion` VARCHAR(255) NULL DEFAULT NULL COMMENT 'Solo aplica si estado=REVOCADA',
+    PRIMARY KEY (`id_solicitud`),
+    INDEX `idx_usuario`        (`id_usuario` ASC),
+    INDEX `idx_estado`         (`estado` ASC),
+    INDEX `idx_usuario_estado` (`id_usuario` ASC, `estado` ASC),
+    CONSTRAINT `solicitudes_jp_ibfk_1`
+        FOREIGN KEY (`id_usuario`) REFERENCES `usuarios` (`id_usuario`) ON DELETE CASCADE,
+    CONSTRAINT `solicitudes_jp_ibfk_2`
+        FOREIGN KEY (`id_rol_facultad`) REFERENCES `roles_facultad` (`id_rol`),
+    CONSTRAINT `solicitudes_jp_ibfk_3`
+        FOREIGN KEY (`id_admin_resuelve`) REFERENCES `usuarios` (`id_usuario`)
+) ENGINE=InnoDB
+  DEFAULT CHARACTER SET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='Postulaciones a JP. Aprobacion genera excepciones T3 en politicas_temporales.';
 
--- multi_docente_admin: denegación a panel_admin_https (recurso 12)
-INSERT INTO politicas_temporales (id_usuario, id_recurso, allow, razon, ancho_banda, expiration) VALUES
-(10, 12, false, 'Denegación panel admin', NULL, '2026-12-31 23:59:59');
 
 -- ============================================================
 -- TABLA: sesiones_activas
@@ -387,14 +414,32 @@ INSERT INTO `usuarios_roles` (id_usuario, id_rol, activo) VALUES
 (4, 6, 1),  -- DOC20192020 -> Docente
 (5, 6, 1),  -- DOC20192021 -> Docente
 (6, 6, 1),  -- DOC20192022 -> Docente
-(7, 7, 1),  -- ADMIN001    -> Admin_TI
+(7, 7, 1);  -- ADMIN001    -> Admin_TI
 
-(8, 3, 1),  -- multi_teleco_docente -> Estudiante_Telecom
-(8, 6, 1),  -- multi_teleco_docente -> Docente
-(9, 4, 1),  -- multi_info_admin -> Estudiante_Informatica
-(9, 7, 1),  -- multi_info_admin -> Admin_TI
-(10,6, 1),  -- multi_docente_admin -> Docente
-(10,7, 1);  -- multi_docente_admin -> Admin_TI
+-- ============================================================
+-- TABLA: audit_log
+-- M5 escribe aqui. Admin_TI consulta para auditoria y metricas.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `audit_log` (
+    `id`          BIGINT       NOT NULL AUTO_INCREMENT,
+    `timestamp`   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `evento`      VARCHAR(50)  NOT NULL COMMENT 'login_exitoso, login_fallido, cuenta_bloqueada, ...',
+    `severidad`   ENUM('INFO','WARNING','ERROR') NOT NULL DEFAULT 'INFO',
+    `usuario`     VARCHAR(20)  NULL COMMENT 'codigo_pucp o correo visitante',
+    `rol`         VARCHAR(50)  NULL,
+    `ip`          VARCHAR(15)  NULL,
+    `mac`         VARCHAR(17)  NULL,
+    `duracion_ms` INT          NULL COMMENT 'Latencia de autenticacion RADIUS en ms',
+    `detalle`     JSON         NULL COMMENT 'Datos adicionales del evento',
+    PRIMARY KEY (`id`),
+    INDEX `idx_evento`    (`evento` ASC),
+    INDEX `idx_usuario`   (`usuario` ASC),
+    INDEX `idx_timestamp` (`timestamp` ASC),
+    INDEX `idx_severidad` (`severidad` ASC)
+) ENGINE=InnoDB
+  DEFAULT CHARACTER SET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='Auditoria de eventos M1. M5 escribe, Admin_TI consulta.';
 
 -- ============================================================
 -- TABLAS NATIVAS DE FREERADIUS (requeridas por rlm_sql)
@@ -589,33 +634,41 @@ CREATE TABLE IF NOT EXISTS `ip_mac_binding` (
 
 -- ============================================================
 -- PERMISOS MYSQL PARA FREERADIUS Y M1
--- Ejecutar como root despues de importar este script:
 -- ============================================================
 CREATE USER IF NOT EXISTS 'radius'@'localhost' IDENTIFIED WITH mysql_native_password BY 'radius_pass';
-GRANT SELECT ON radius_db.radcheck          TO 'radius'@'localhost';
-GRANT SELECT ON radius_db.radreply          TO 'radius'@'localhost';
-GRANT SELECT ON radius_db.radusergroup      TO 'radius'@'localhost';
-GRANT SELECT ON radius_db.radgroupcheck     TO 'radius'@'localhost';
-GRANT SELECT ON radius_db.radgroupreply     TO 'radius'@'localhost';
-GRANT ALL    ON radius_db.radacct           TO 'radius'@'localhost';
-GRANT ALL    ON radius_db.radpostauth       TO 'radius'@'localhost';
-GRANT ALL    ON radius_db.usuarios          TO 'radius'@'localhost';
-GRANT ALL    ON radius_db.sesiones_activas  TO 'radius'@'localhost';
-GRANT ALL    ON radius_db.ip_mac_binding    TO 'radius'@'localhost';
-GRANT ALL    ON radius_db.historial_sesiones TO 'radius'@'localhost';
-GRANT SELECT ON radius_db.politicas_rbac    TO 'radius'@'localhost';
-GRANT SELECT ON radius_db.recursos          TO 'radius'@'localhost';
-GRANT SELECT ON radius_db.roles_facultad    TO 'radius'@'localhost';
-GRANT SELECT ON radius_db.servidores        TO 'radius'@'localhost';
 
--- 'radius' solo tenia SELECT en estas dos tablas, pero el flujo
--- de visitante necesita escribir credenciales temporales (insertar al
--- autenticar, borrar al cerrar sesion). Sin esto, las operaciones de
--- escritura sobre radcheck/radusergroup fallaban por falta de permisos
-GRANT SELECT ON radius_db.radcheck             TO 'radius'@'localhost';
-GRANT INSERT, DELETE ON radius_db.radcheck     TO 'radius'@'localhost';
-GRANT SELECT ON radius_db.radusergroup         TO 'radius'@'localhost';
-GRANT INSERT, DELETE ON radius_db.radusergroup TO 'radius'@'localhost';
+-- Tablas FreeRADIUS (solo lectura excepto radacct y radpostauth)
+GRANT SELECT                    ON radius_db.radgroupcheck      TO 'radius'@'localhost';
+GRANT SELECT                    ON radius_db.radgroupreply      TO 'radius'@'localhost';
+GRANT SELECT                    ON radius_db.radreply           TO 'radius'@'localhost';
+GRANT ALL PRIVILEGES            ON radius_db.radacct            TO 'radius'@'localhost';
+GRANT ALL PRIVILEGES            ON radius_db.radpostauth        TO 'radius'@'localhost';
+
+-- radcheck y radusergroup: lectura + escritura temporal para visitantes
+GRANT SELECT, INSERT, DELETE    ON radius_db.radcheck           TO 'radius'@'localhost';
+GRANT SELECT, INSERT, DELETE    ON radius_db.radusergroup       TO 'radius'@'localhost';
+
+-- Tablas de M1
+GRANT ALL PRIVILEGES            ON radius_db.usuarios           TO 'radius'@'localhost';
+GRANT ALL PRIVILEGES            ON radius_db.sesiones_activas   TO 'radius'@'localhost';
+GRANT ALL PRIVILEGES            ON radius_db.ip_mac_binding     TO 'radius'@'localhost';
+GRANT ALL PRIVILEGES            ON radius_db.historial_sesiones TO 'radius'@'localhost';
+
+-- Tablas de solo lectura para M1/M2
+GRANT SELECT                    ON radius_db.politicas_rbac     TO 'radius'@'localhost';
+GRANT SELECT                    ON radius_db.recursos           TO 'radius'@'localhost';
+GRANT SELECT                    ON radius_db.roles_facultad     TO 'radius'@'localhost';
+GRANT SELECT                    ON radius_db.servidores         TO 'radius'@'localhost';
+
+-- politicas_temporales: M1 necesita leer y escribir (T3 de JP)
+GRANT SELECT, INSERT, UPDATE, DELETE ON radius_db.politicas_temporales TO 'radius'@'localhost';
+
+-- solicitudes_jp: M1 gestiona el ciclo de vida de postulaciones JP
+GRANT SELECT, INSERT, UPDATE    ON radius_db.solicitudes_jp     TO 'radius'@'localhost';
+
+-- audit_log: M5 escribe, Admin_TI consulta via endpoints M5
+GRANT SELECT, INSERT ON radius_db.audit_log TO 'radius'@'localhost';
+
 FLUSH PRIVILEGES;
 
 SET SQL_MODE=@OLD_SQL_MODE;
