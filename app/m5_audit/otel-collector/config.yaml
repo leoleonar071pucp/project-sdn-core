@@ -18,7 +18,7 @@ processors:
 
 exporters:
   otlp_http/tempo:
-    endpoint: tempo:4317
+    endpoint: http://tempo:4318
     tls:
       insecure: true
 
