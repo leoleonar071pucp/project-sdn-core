@@ -14,7 +14,7 @@ from dataclasses import dataclass
 class TelemetryConfig:
     service_name: str
     service_version: str
-    collector_endpoint: str = "http://otel-collector:4318"
+    collector_endpoint: str = "http://localhost:4318"  # "http://otel-collector:4318"  # "http://192.168.201.251:4318"
     environment: str = "development"
     instance_id: str | None = None
 

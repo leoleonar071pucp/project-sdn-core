@@ -382,6 +382,25 @@ class SessionManager:
     def __init__(self, db):
         self.db = db
 
+    def get_session_by_usuario(self, id_usuario: int):
+        """Retorna la sesión activa de un usuario si existe, o None."""
+        conn = self.db.get_connection()
+        if not conn:
+            return None
+        try:
+            cur = conn.cursor(dictionary=True)
+            cur.execute("""
+                SELECT id_sesion, mac_address, ip_asignada, nombre_rol, switch_dpid, in_port
+                FROM sesiones_activas
+                WHERE id_usuario = %s
+                LIMIT 1
+            """, (id_usuario,))
+            return cur.fetchone()
+        except Exception:
+            return None
+        finally:
+            conn.close()
+
     def verify_antispoofing(self, ip, mac):
         conn = self.db.get_connection()
         if not conn:
