@@ -31,7 +31,7 @@ import time
 import socket
 import datetime
 import argparse
-
+import getpass
 try:
     import requests
     REQUESTS_OK = True
@@ -169,7 +169,7 @@ class CaptivePortalCLI:
         print(Config.SEP2)
         try:
             codigo   = input("  Código PUCP : ").strip()
-            password = input("  Contraseña  : ").strip()
+            password = getpass.getpass("  Contraseña  : ").strip()
         except KeyboardInterrupt:
             print("\n\n  Sesión cancelada.")
             return
@@ -637,7 +637,7 @@ class CaptivePortalCLI:
         print(Config.SEP2)
         try:
             correo   = input("  Correo    : ").strip()
-            password = input("  Contraseña: ").strip()
+            password = getpass.getpass("  Contraseña: ").strip()
         except KeyboardInterrupt:
             print("\n\n  Cancelado.")
             return
