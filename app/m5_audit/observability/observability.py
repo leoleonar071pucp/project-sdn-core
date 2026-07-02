@@ -6,7 +6,7 @@ from .context import Context
 from .events import EventDefinition
 from .telemetry import Telemetry
 
-from opentelemetry.sdk._logs.severity import SeverityNumber
+from opentelemetry._logs import LogRecord, SeverityNumber
 
 
 _RESERVED_ATTRIBUTES = frozenset({
@@ -26,7 +26,6 @@ _SEVERITY_MAP = {
     "WARN": SeverityNumber.WARN,
     "ERROR": SeverityNumber.ERROR,
 }
-
 
 class Observability:
 
@@ -104,12 +103,15 @@ class Observability:
             attrs.update(attributes)
 
         try:
-            self._telemetry.logger.emit(
+            record = LogRecord(
                 body=event.message,
                 severity_text=event.severity,
                 severity_number=_SEVERITY_MAP[event.severity],
                 attributes=attrs,
             )
 
+            self._telemetry.logger.emit(record)
+
         except Exception as exc:
             print(f"[Observability] {exc}")
+            return

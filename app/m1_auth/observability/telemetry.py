@@ -8,7 +8,9 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 
 from .resources import ResourceFactory
+from dataclasses import dataclass
 
+@dataclass
 class TelemetryConfig:
     service_name: str
     service_version: str
@@ -23,6 +25,7 @@ class Telemetry:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
         return cls._instance
 
     def initialize(self, config: TelemetryConfig) -> None:
