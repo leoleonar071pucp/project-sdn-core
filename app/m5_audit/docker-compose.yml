@@ -65,7 +65,7 @@ services:
       - tempo-data:/var/tempo
 
     healthcheck:
-      test: ["CMD", "wget --spider -q http://localhost:3200/ready"]
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:3200/ready || exit 1"]
       interval: 20s
       timeout: 5s
       retries: 5
