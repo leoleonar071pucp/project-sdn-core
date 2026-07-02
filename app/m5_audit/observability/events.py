@@ -12,7 +12,7 @@ class EventDefinition:
     severity: str
     message: str
 
-class Severity(Enum):
+class Severity(str):
     INFO = "INFO"
     WARN = "WARN"
     ERROR = "ERROR"
