@@ -961,7 +961,7 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
 
         # ── M5: login exitoso ─────────────────────────────────────
         obs.event(
-            Events.AUTH_LOGIN_SUCCESS,
+            Events.AUTH_SUCCESS,
             attributes={
                 "auth.duration.ms": duracion_ms,
             },
@@ -1118,7 +1118,7 @@ def autenticar_visitante(correo: str, password: str, ip_asignada: str) -> dict:
 
         # ── M5: login visitante exitoso ─────────────────────────────────────
             obs.event(
-                Events.AUTH_LOGIN_SUCCESS,
+                Events.AUTH_SUCCESS,
                 attributes={
                     "user.correo": correo,
                     "user.visitante": True,
