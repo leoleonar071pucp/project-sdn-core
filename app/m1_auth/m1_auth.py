@@ -858,6 +858,7 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
 
         obs.update_context(user_id=id_usuario, user_role=nombre_rol)
 
+        sesion_existente = _sessions.get_session_by_usuario(id_usuario) 
         # ── Resolución de host (MAC, switch, puerto) ─────────────────────────────
         # En modo de prueba (M6_HABILITADO=False) se omite la llamada real a M6
         # y se usan valores dummy, para poder seguir probando RADIUS + MySQL
