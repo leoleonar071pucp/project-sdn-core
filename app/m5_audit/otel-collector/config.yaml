@@ -17,7 +17,7 @@ processors:
   batch:
 
 exporters:
-  otlp/tempo:
+  otlp_http/tempo:
     endpoint: tempo:4317
     tls:
       insecure: true
@@ -40,7 +40,7 @@ service:
         - memory_limiter
         - batch
       exporters:
-        - otlp/tempo
+        - otlp_http/tempo
         - debug
 
     logs:
