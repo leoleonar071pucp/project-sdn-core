@@ -124,12 +124,19 @@ class Config:
     MONITORING_GRE_INSTALL_ON_STARTUP = env_bool.__func__(
         "MONITORING_GRE_INSTALL_ON_STARTUP", False
     )
-    PORTAL_SYNC_INTERVAL = int(os.getenv("PORTAL_SYNC_INTERVAL", "0"))
+    PORTAL_SYNC_INTERVAL = int(os.getenv("PORTAL_SYNC_INTERVAL", "60"))
+    PORTAL_FORWARD_PERMANENT = env_bool.__func__(
+        "PORTAL_FORWARD_PERMANENT", True
+    )
+    PORTAL_RETURN_TIMEOUT = int(os.getenv("PORTAL_RETURN_TIMEOUT", "5400"))
     REACTIVE_DATA_FLOWS_ENABLED = env_bool.__func__(
         "REACTIVE_DATA_FLOWS_ENABLED", False
     )
     SESSION_EXPIRE_ON_T1_REMOVED = env_bool.__func__(
         "SESSION_EXPIRE_ON_T1_REMOVED", False
+    )
+    SESSION_CLEANUP_ON_STARTUP = env_bool.__func__(
+        "SESSION_CLEANUP_ON_STARTUP", True
     )
     SESSION_IDLE_TIMEOUT = int(os.getenv("SESSION_IDLE_TIMEOUT", "5400"))
     PACKET_IN_DEDUP_WINDOW = float(os.getenv("PACKET_IN_DEDUP_WINDOW", "2"))
@@ -146,6 +153,7 @@ class Config:
         "PACKET_IN_RATE_LIMIT_MAX_DESTINATIONS", "15"
     ))
     M1_INTERNAL_URL = os.getenv("M1_INTERNAL_URL", "http://127.0.0.1:8282")
+    M6_LOG_FILE = os.getenv("M6_LOG_FILE", "/home/ubuntu/logs/m6_portal_stable.log")
 
     # Resiliencia
     MAX_REINTENTOS = 3
@@ -243,14 +251,18 @@ class FlowBuilder:
     # ── T1: Cuarentena (tabla 1) ─────────────────────────────────────────────
 
     def t1_portal_edge_forward(self, device_id, out_port,
-                               ip_portal=None, session_timeout=900):
+                               ip_portal=None, session_timeout=None):
         """T1 borde usuario — cualquier host puede ir al portal cautivo."""
         if ip_portal is None:
             ip_portal = Config.PORTAL_IP
+        permanent = Config.PORTAL_FORWARD_PERMANENT
+        timeout = 0 if permanent else int(
+            session_timeout or Config.PORTAL_RETURN_TIMEOUT
+        )
         return {
             "priority":    Config.PRIO_PORTAL_EDGE_T1,
-            "isPermanent": False,
-            "timeout":     int(session_timeout),
+            "isPermanent": permanent,
+            "timeout":     timeout,
             "deviceId":    device_id,
             "tableId":     1,
             "selector": {"criteria": [
@@ -265,14 +277,15 @@ class FlowBuilder:
         }
 
     def t1_portal_edge_return(self, device_id, in_port, out_port,
-                              host_ip, ip_portal=None, session_timeout=900):
+                              host_ip, ip_portal=None, session_timeout=None):
         """T1 borde usuario — respuesta del portal vuelve al puerto del host."""
         if ip_portal is None:
             ip_portal = Config.PORTAL_IP
+        timeout = int(session_timeout or Config.PORTAL_RETURN_TIMEOUT)
         return {
             "priority":    Config.PRIO_PORTAL_EDGE_T1,
             "isPermanent": False,
-            "timeout":     int(session_timeout),
+            "timeout":     timeout,
             "deviceId":    device_id,
             "tableId":     1,
             "selector": {"criteria": [
@@ -1742,7 +1755,7 @@ class M6Translator:
             self.onos.eliminar_flow(device_id, flow_id)
         return len(flows)
 
-    def _asegurar_portal_ida_borde(self, host, portal_host, ttl=900):
+    def _asegurar_portal_ida_borde(self, host, portal_host, ttl=None):
         """Asegura la ida generica T1 host-edge -> portal."""
         ida = self.onos.calcular_pasos(
             host["switch_dpid"], host["in_port"],
@@ -1772,17 +1785,19 @@ class M6Translator:
         if fid:
             with self._lock:
                 self.flows_t0_shared[key] = (
-                    device_id, fid, time.time() + int(ttl)
+                    device_id, fid, None
                 )
             print(f"    [PORTAL] T1 ida generica {device_id} -> {out_port}")
         return fid
 
-    def _instalar_camino_portal(self, host, portal_host, ip_host, ttl=900):
+    def _instalar_camino_portal(self, host, portal_host, ip_host, ttl=None):
         """
         Instala cuarentena minima host<->portal TCP/8282. Estos flows no son
         de sesion autenticada. Solo el borde usuario queda por host; el tramo
         troncal/portal se agrega para no multiplicar flows por usuario.
         """
+        if ttl is None:
+            ttl = Config.PORTAL_RETURN_TIMEOUT
         mac = host["mac"].lower()
         self._eliminar_flows_portal(mac)
 
@@ -2565,6 +2580,154 @@ class M6Translator:
             "flows_eliminados": len(flows)
         })
 
+    @staticmethod
+    def _criteria_value(criteria, tipo, field):
+        for criterion in criteria:
+            if criterion.get("type") == tipo:
+                return criterion.get(field)
+        return None
+
+    def _sesiones_activas_db_keys(self):
+        """Retorna set de (mac, ip, switch, in_port) que siguen activos en DB."""
+        active = set()
+        if not (Config.MYSQL_SECURITY_READS_ENABLED and MYSQL_OK):
+            return active
+        try:
+            conn = mysql.connector.connect(
+                host=Config.MYSQL_HOST,
+                user=Config.MYSQL_USER,
+                password=Config.MYSQL_PASS,
+                database=Config.MYSQL_DB,
+                connection_timeout=3,
+            )
+            cur = conn.cursor(dictionary=True)
+            cur.execute(
+                """
+                SELECT mac_address, ip_asignada, switch_dpid, in_port
+                FROM sesiones_activas
+                WHERE estado='ACTIVA'
+                """
+            )
+            for row in cur.fetchall():
+                if not all(row.get(k) is not None for k in (
+                    "mac_address", "ip_asignada", "switch_dpid", "in_port"
+                )):
+                    continue
+                active.add((
+                    str(row["mac_address"]).lower(),
+                    str(row["ip_asignada"]),
+                    str(row["switch_dpid"]),
+                    int(row["in_port"]),
+                ))
+            cur.close()
+            conn.close()
+        except Exception as exc:
+            print(f"[M6] Error leyendo sesiones activas para cleanup: {exc}")
+        return active
+
+    def cleanup_session_gates_huerfanos(self, dry_run=False):
+        """
+        Borra T1 session gates que siguen en ONOS pero ya no existen como
+        sesiones activas en M6/DB. No toca portal, T2/T3/T4 ni control.
+        """
+        db_active = self._sesiones_activas_db_keys()
+        stale = []
+        kept = []
+        adopted = []
+        protected_src_ips = {
+            Config.PORTAL_IP,
+            Config.SERVER_CURSOS,
+            Config.SERVER_NOTAS,
+        }
+        for device_id in self.onos.get_devices():
+            for flow in self.onos.get_flows(device_id):
+                if int(flow.get("tableId", -1)) != 1:
+                    continue
+                if int(flow.get("priority", -1)) != Config.PRIO_T1_SESSION_GATE:
+                    continue
+                criteria = flow.get("selector", {}).get("criteria", [])
+                mac = self._criteria_value(criteria, "ETH_SRC", "mac")
+                ip_src = self._criteria_value(criteria, "IPV4_SRC", "ip")
+                in_port = self._criteria_value(criteria, "IN_PORT", "port")
+                if not mac or not ip_src or in_port is None:
+                    kept.append({
+                        "device_id": device_id,
+                        "flow_id": flow.get("id"),
+                        "reason": "incomplete_selector",
+                    })
+                    continue
+                ip_src = str(ip_src).split("/")[0]
+                if ip_src in protected_src_ips:
+                    kept.append({
+                        "device_id": device_id,
+                        "flow_id": flow.get("id"),
+                        "mac": str(mac).lower(),
+                        "ip": ip_src,
+                        "reason": "server_or_portal_response_gate",
+                    })
+                    continue
+                key = (str(mac).lower(), ip_src, device_id, int(in_port))
+                if key in db_active:
+                    if not dry_run:
+                        with self._lock:
+                            self.session_gates[key[0]] = (
+                                device_id,
+                                flow.get("id"),
+                                time.time() + Config.SESSION_IDLE_TIMEOUT,
+                            )
+                            session_flows = self.flows_por_sesion.setdefault(
+                                key[0], []
+                            )
+                            flow_ref = (device_id, flow.get("id"))
+                            if flow_ref not in session_flows:
+                                session_flows.append(flow_ref)
+                                adopted.append({
+                                    "device_id": device_id,
+                                    "flow_id": flow.get("id"),
+                                    "mac": key[0],
+                                    "ip": key[1],
+                                })
+                    kept.append({
+                        "device_id": device_id,
+                        "flow_id": flow.get("id"),
+                        "mac": key[0],
+                        "ip": key[1],
+                        "reason": "active_db_session",
+                    })
+                    continue
+                stale.append({
+                    "device_id": device_id,
+                    "flow_id": flow.get("id"),
+                    "mac": key[0],
+                    "ip": key[1],
+                    "in_port": key[3],
+                    "priority": flow.get("priority"),
+                    "tableId": flow.get("tableId"),
+                })
+
+        removed = []
+        failed = []
+        if not dry_run:
+            for item in stale:
+                ok = self.onos.eliminar_flow(item["device_id"], item["flow_id"])
+                target = removed if ok else failed
+                target.append(item)
+            with self._lock:
+                for item in stale:
+                    mac = item.get("mac")
+                    self.session_gates.pop(mac, None)
+                    self.flows_por_sesion.pop(mac, None)
+        return {
+            "ok": True,
+            "dry_run": bool(dry_run),
+            "active_db_sessions": len(db_active),
+            "stale": stale,
+            "kept": kept,
+            "adopted": adopted,
+            "removed": removed,
+            "failed": failed,
+        }
+
     # ── Mitigación de ataques (M4) ────────────────────────────────────────────
 
     def _buscar_sesion_db_por_ip(self, ip):
@@ -2911,6 +3074,177 @@ class M6Translator:
             ),
         }
 
+    @staticmethod
+    def _short_flow(flow):
+        device_id = flow.get("deviceId")
+        return {
+            "id": flow.get("id"),
+            "state": flow.get("state"),
+            "deviceId": device_id,
+            "deviceName": Config.SWITCH_NOMBRES.get(device_id, device_id),
+            "tableId": flow.get("tableId"),
+            "priority": flow.get("priority"),
+            "isPermanent": flow.get("isPermanent"),
+            "timeout": flow.get("timeout"),
+            "life": flow.get("life"),
+            "packets": flow.get("packets"),
+            "bytes": flow.get("bytes"),
+            "selector": flow.get("selector", {}).get("criteria", []),
+            "treatment": flow.get("treatment", {}),
+        }
+
+    def dashboard_summary(self):
+        devices = self.onos.get_devices()
+        mitigations = self.listar_mitigaciones(active_only=False)
+        active_mitigations = [m for m in mitigations if m.get("active")]
+        with self._lock:
+            sessions = dict(self.flows_por_sesion)
+            portals = dict(self.flows_portal)
+            session_gates = dict(self.session_gates)
+            shared = dict(self.flows_t0_shared)
+        return {
+            "ok": True,
+            "status": "ok",
+            "onos_url": Config.ONOS_URL,
+            "devices_count": len(devices),
+            "devices": devices,
+            "sessions_count": len(sessions),
+            "session_gate_count": len(session_gates),
+            "portal_hosts_count": len(portals),
+            "mitigations_count": len(mitigations),
+            "active_mitigations_count": len(active_mitigations),
+            "portal_sync_interval": Config.PORTAL_SYNC_INTERVAL,
+            "portal_forward_permanent": Config.PORTAL_FORWARD_PERMANENT,
+            "portal_return_timeout": Config.PORTAL_RETURN_TIMEOUT,
+            "session_idle_timeout": Config.SESSION_IDLE_TIMEOUT,
+            "data_flow_timeout": Config.DATA_FLOW_TIMEOUT,
+            "network_actions_enabled": Config.NETWORK_ACTIONS_ENABLED,
+            "onos_reads_enabled": Config.ONOS_READS_ENABLED,
+            "onos_writes_enabled": Config.ONOS_WRITES_ENABLED,
+            "reactive_data_flows_enabled": Config.REACTIVE_DATA_FLOWS_ENABLED,
+            "t0_shared_flows_count": len(shared),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def dashboard_portal(self):
+        portal_ip = Config.PORTAL_IP
+        portal_forward = []
+        portal_return = []
+        all_flows = []
+        for device_id in self.onos.get_devices():
+            for flow in self.onos.get_flows(device_id):
+                if str(flow.get("tableId")) != "1":
+                    continue
+                criteria = flow.get("selector", {}).get("criteria", [])
+                serialized = str(criteria)
+                if portal_ip not in serialized or "8282" not in serialized:
+                    continue
+                item = self._short_flow(flow)
+                item["deviceId"] = device_id
+                all_flows.append(item)
+                if "IPV4_DST" in serialized and "TCP_DST" in serialized:
+                    portal_forward.append(item)
+                elif "IPV4_SRC" in serialized and "TCP_SRC" in serialized:
+                    portal_return.append(item)
+
+        hosts_by_ip = {}
+        for h in self.onos.get_hosts():
+            locs = h.get("locations") or []
+            if not locs:
+                continue
+            for ip_addr in h.get("ipAddresses", []):
+                if ip_addr.startswith("192.168.100.") and ip_addr != portal_ip:
+                    hosts_by_ip[ip_addr] = {
+                        "ip": ip_addr,
+                        "mac": h.get("mac"),
+                        "switch_dpid": locs[0].get("elementId"),
+                        "in_port": locs[0].get("port"),
+                    }
+        with self._lock:
+            portal_ips = dict(self.portal_ips)
+            cached = {mac: list(flows) for mac, flows in self.flows_portal.items()}
+        portal_hosts = []
+        for mac, ip_addr in sorted(portal_ips.items(), key=lambda item: item[1]):
+            portal_hosts.append({
+                **hosts_by_ip.get(ip_addr, {"ip": ip_addr, "mac": mac}),
+                "mac": mac,
+                "cached_flows": len(cached.get(mac, [])),
+                "return_flow_present": any(
+                    ip_addr in str(f.get("selector", {})) for f in portal_return
+                ),
+            })
+        return {
+            "ok": True,
+            "portal_ip": portal_ip,
+            "portal_forward": portal_forward,
+            "portal_return": portal_return,
+            "portal_hosts": portal_hosts,
+            "flows": all_flows,
+            "sync_interval": Config.PORTAL_SYNC_INTERVAL,
+            "return_timeout": Config.PORTAL_RETURN_TIMEOUT,
+        }
+
+    def dashboard_sessions(self):
+        with self._lock:
+            flows = {mac: list(items) for mac, items in self.flows_por_sesion.items()}
+            gates = dict(self.session_gates)
+            portal_ips = dict(self.portal_ips)
+        hosts = {}
+        for h in self.onos.get_hosts():
+            locs = h.get("locations") or []
+            if not locs:
+                continue
+            mac = str(h.get("mac", "")).lower()
+            hosts[mac] = {
+                "mac": mac,
+                "ips": h.get("ipAddresses", []),
+                "switch_dpid": locs[0].get("elementId"),
+                "in_port": locs[0].get("port"),
+                "vlan": h.get("vlan"),
+            }
+        sessions = []
+        for mac in sorted(set(flows) | set(gates) | set(portal_ips)):
+            gate = gates.get(mac)
+            sessions.append({
+                **hosts.get(mac, {
+                    "mac": mac,
+                    "ips": [portal_ips.get(mac)] if portal_ips.get(mac) else [],
+                }),
+                "session_flows": len(flows.get(mac, [])),
+                "session_gate_present": bool(gate),
+                "session_gate_flow": gate[1] if gate else None,
+                "session_gate_expires_at": gate[2] if gate else None,
+                "portal_ip": portal_ips.get(mac),
+            })
+        return {"ok": True, "sessions": sessions}
+
+    def dashboard_flows(self, device_id=None, table_id=None, limit=200):
+        devices = [device_id] if device_id else self.onos.get_devices()
+        result = []
+        for dev in devices:
+            for flow in self.onos.get_flows(dev):
+                if table_id is not None and str(flow.get("tableId")) != str(table_id):
+                    continue
+                item = self._short_flow(flow)
+                item["deviceId"] = dev
+                result.append(item)
+                if len(result) >= limit:
+                    return {"ok": True, "flows": result, "truncated": True}
+        return {"ok": True, "flows": result, "truncated": False}
+
+    def dashboard_events(self, limit=120, contains=None):
+        limit = max(1, min(int(limit), 300))
+        try:
+            with open(Config.M6_LOG_FILE, "r", encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()
+        except FileNotFoundError:
+            return {"ok": True, "log_file": Config.M6_LOG_FILE, "events": []}
+        if contains:
+            needle = str(contains).lower()
+            lines = [line for line in lines if needle in line.lower()]
+        events = [line.rstrip("\n") for line in lines[-limit:]]
+        return {"ok": True, "log_file": Config.M6_LOG_FILE, "events": events}
+
 
 # ─── Flask API ────────────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -2987,6 +3321,15 @@ def endpoint_flow_expired():
     data = request.json or {}
     resultado = m6.procesar_flow_expired(data)
     return jsonify(resultado), 200 if resultado.get("ok") else 400
+
+
+@app.route("/m6/sessions/cleanup-stale", methods=["POST"])
+def endpoint_cleanup_stale_sessions():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    dry_run = str(request.args.get("dry_run", "")).lower() in {"1", "true", "yes"}
+    resultado = m6.cleanup_session_gates_huerfanos(dry_run=dry_run)
+    return jsonify(resultado), 200 if resultado.get("ok") else 500
 
 
 @app.route("/m6/portal/sync", methods=["POST"])
@@ -3070,6 +3413,403 @@ def endpoint_mitigation_status(incident_id):
     if result is None:
         return jsonify({"error": "mitigación no encontrada"}), 404
     return jsonify(result), 200
+
+
+@app.route("/m6/dashboard/summary", methods=["GET"])
+def endpoint_dashboard_summary():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    return jsonify(m6.dashboard_summary()), 200
+
+
+@app.route("/m6/dashboard/portal", methods=["GET"])
+def endpoint_dashboard_portal():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    return jsonify(m6.dashboard_portal()), 200
+
+
+@app.route("/m6/dashboard/sessions", methods=["GET"])
+def endpoint_dashboard_sessions():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    return jsonify(m6.dashboard_sessions()), 200
+
+
+@app.route("/m6/dashboard/flows", methods=["GET"])
+def endpoint_dashboard_flows():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    device_id = request.args.get("device")
+    table_id = request.args.get("table")
+    limit = int(request.args.get("limit", "200"))
+    return jsonify(m6.dashboard_flows(device_id=device_id,
+                                      table_id=table_id,
+                                      limit=limit)), 200
+
+
+@app.route("/m6/dashboard/events", methods=["GET"])
+def endpoint_dashboard_events():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    limit = int(request.args.get("limit", "120"))
+    contains = request.args.get("contains")
+    return jsonify(m6.dashboard_events(limit=limit, contains=contains)), 200
+
+
+@app.route("/m6/dashboard", methods=["GET"])
+def endpoint_m6_dashboard():
+    html = r"""<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>M6 Observabilidad</title>
+  <style>
+    :root { font-family: Inter, system-ui, Arial, sans-serif; color: #172033; background: #f4f6fa; }
+    body { margin: 0; }
+    header { background: #fff; border-bottom: 1px solid #dbe2ec; padding: 14px 20px; display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+    h1 { margin: 0; font-size: 20px; }
+    main { padding: 16px 20px 28px; }
+    .controls, .tabs, .filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    input, select, button { height: 34px; border: 1px solid #aeb9c8; border-radius: 6px; padding: 0 10px; background: #fff; color: #172033; }
+    button { cursor: pointer; }
+    button.primary { background: #2458d3; color: #fff; border-color: #2458d3; }
+    button.danger { color: #aa2626; border-color: #c94444; }
+    .tabs { margin: 0 0 14px; }
+    .tab { background: #fff; }
+    .tab.active { background: #172033; color: #fff; border-color: #172033; }
+    .grid { display: grid; grid-template-columns: repeat(5, minmax(130px, 1fr)); gap: 10px; margin-bottom: 14px; }
+    .metric, .panel { background: #fff; border: 1px solid #dbe2ec; border-radius: 8px; padding: 12px; }
+    .metric strong { display: block; font-size: 22px; }
+    .metric span, .muted { color: #637086; font-size: 12px; }
+    .status { min-height: 20px; margin: 10px 0; color: #637086; font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; min-width: 980px; }
+    .table-wrap { overflow: auto; background: #fff; border: 1px solid #dbe2ec; border-radius: 8px; }
+    th, td { padding: 9px 10px; border-bottom: 1px solid #edf1f6; text-align: left; font-size: 13px; vertical-align: top; }
+    th { background: #f8fafd; position: sticky; top: 0; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    pre { white-space: pre-wrap; margin: 0; max-height: 520px; overflow: auto; }
+    .badge { display: inline-block; border-radius: 999px; padding: 3px 8px; font-weight: 700; font-size: 12px; }
+    .chip { display: inline-block; border-radius: 5px; padding: 3px 6px; margin: 2px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; border: 1px solid #d3dbe8; background: #f7f9fc; }
+    .chip.src { background: #e8f2ff; border-color: #9ec7ff; color: #174f91; }
+    .chip.dst { background: #fff0dc; border-color: #ffc578; color: #7b4700; }
+    .chip.port { background: #edf7e8; border-color: #a8d99b; color: #246b1c; }
+    .chip.vlan { background: #f1eaff; border-color: #c7aef7; color: #57309a; }
+    .chip.action { background: #e9f7f6; border-color: #94d5cd; color: #1f665f; font-weight: 700; }
+    .chip.drop { background: #ffe8e8; border-color: #ffaaaa; color: #9b2222; font-weight: 700; }
+    .hint { display: block; color: #637086; font-size: 12px; margin-top: 3px; }
+    .ok { background: #e6f7ed; color: #176b3a; }
+    .warn { background: #fff4d6; color: #8a5a00; }
+    .bad { background: #ffe5e5; color: #a02727; }
+    .view { display: none; }
+    .view.active { display: block; }
+    @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, minmax(130px, 1fr)); } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>M6 Observabilidad</h1>
+    <div class="controls">
+      <input id="token" type="password" placeholder="X-Security-Token">
+      <select id="refreshRate"><option value="5000">5s</option><option value="10000">10s</option><option value="0">Pausado</option></select>
+      <button id="refresh" class="primary">Actualizar</button>
+    </div>
+  </header>
+  <main>
+    <div class="tabs">
+      <button class="tab active" data-view="summary">Resumen</button>
+      <button class="tab" data-view="portal">Portal</button>
+      <button class="tab" data-view="sessions">Sesiones</button>
+      <button class="tab" data-view="mitigations">Mitigaciones</button>
+      <button class="tab" data-view="flows">Flows</button>
+      <button class="tab" data-view="events">Eventos</button>
+    </div>
+    <div id="status" class="status">Ingresa token y actualiza.</div>
+
+    <section id="summary" class="view active">
+      <div class="grid" id="summaryGrid"></div>
+      <div class="panel"><pre id="summaryRaw"></pre></div>
+    </section>
+
+    <section id="portal" class="view">
+      <div class="filters"><button id="ensurePortal" class="primary">Reasegurar Portal</button></div>
+      <div class="grid" id="portalGrid"></div>
+      <div class="table-wrap"><table><thead><tr><th>Tipo</th><th>Device</th><th>Match</th><th>Accion</th><th>Perm</th><th>Timeout</th><th>Pkts</th></tr></thead><tbody id="portalRows"></tbody></table></div>
+    </section>
+
+    <section id="sessions" class="view">
+      <div class="table-wrap"><table><thead><tr><th>MAC</th><th>IPs</th><th>SW/Puerto</th><th>VLAN</th><th>T1</th><th>Flows sesión</th><th>Portal IP</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
+    </section>
+
+    <section id="mitigations" class="view">
+      <div class="filters"><input id="mitigationFilter" placeholder="Filtrar IP, SID o acción"></div>
+      <div class="table-wrap"><table><thead><tr><th>Estado</th><th>IP/MAC</th><th>SID</th><th>Acción</th><th>Destino</th><th>Tiempo</th><th>Flow IDs</th><th>Levantar</th></tr></thead><tbody id="mitigationRows"></tbody></table></div>
+    </section>
+
+    <section id="flows" class="view">
+      <div class="filters">
+        <select id="flowDevice"><option value="">Todos los switches</option></select>
+        <select id="flowTable"><option value="">Todas las tablas</option><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option></select>
+        <select id="flowKind">
+          <option value="">Todos los tipos</option>
+          <option value="portal_ida">Portal ida</option>
+          <option value="portal_vuelta">Portal vuelta</option>
+          <option value="sesion_usuario">Sesion usuario</option>
+          <option value="academico_ida">Academico ida</option>
+          <option value="academico_vuelta">Academico vuelta</option>
+          <option value="mitigacion_drop">Mitigacion/drop</option>
+          <option value="miss_goto">Miss/goto</option>
+          <option value="control">Control</option>
+        </select>
+        <select id="flowSort">
+          <option value="priority_desc">Prioridad mayor</option>
+          <option value="priority_asc">Prioridad menor</option>
+          <option value="table_asc">Tabla</option>
+          <option value="packets_desc">Mas paquetes</option>
+          <option value="life_desc">Mas reciente/vida</option>
+        </select>
+        <input id="flowMinPriority" type="number" placeholder="Prioridad min">
+        <input id="flowFilter" placeholder="Filtrar texto">
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Device</th><th>T</th><th>Prio</th><th>Sentido</th><th>Estado</th><th>Match</th><th>Tratamiento</th><th>Pkts</th><th>Timeout</th></tr></thead><tbody id="flowRows"></tbody></table></div>
+    </section>
+
+    <section id="events" class="view">
+      <div class="filters"><input id="eventFilter" placeholder="Filtrar logs: PORTAL, security, token..."><button id="loadEvents">Cargar eventos</button></div>
+      <div class="panel"><pre id="eventLog"></pre></div>
+    </section>
+  </main>
+<script>
+const state = {view: 'summary', timer: null, data: {}};
+const tokenInput = document.getElementById('token');
+tokenInput.value = sessionStorage.getItem('m6Token') || '';
+function h() { return {'X-Security-Token': tokenInput.value.trim()}; }
+function esc(v) { return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function j(v) { return esc(JSON.stringify(v ?? {}, null, 0)); }
+function setStatus(msg) { document.getElementById('status').textContent = msg; }
+function metric(label, value, klass='') { return `<div class="metric"><strong class="${klass}">${esc(value)}</strong><span>${esc(label)}</span></div>`; }
+const swNames = {
+  'of:00007e3892af7141': 'SW1',
+  'of:0000e2ecb0ea0445': 'SW2',
+  'of:0000eadb63449748': 'SW3',
+  'of:00006a0757adfc4e': 'SW4',
+  'of:0000ca126249d546': 'SW5'
+};
+const academicServers = ['192.168.100.101', '192.168.100.102'];
+function swLabel(id) { return swNames[id] || id || '-'; }
+function criterionValue(c) { return c.ip || c.mac || c.port || c.tcpPort || c.protocol || c.vlanId || c.ethType || ''; }
+function criterionClass(c) {
+  if (c.type === 'IPV4_SRC' || c.type === 'ETH_SRC') return 'src';
+  if (c.type === 'IPV4_DST' || c.type === 'ETH_DST') return 'dst';
+  if ((c.type || '').includes('PORT') || c.type === 'IN_PORT') return 'port';
+  if (c.type === 'VLAN_VID') return 'vlan';
+  return '';
+}
+function flowMatchHtml(f) {
+  return (f.selector || []).map(c => `<span class="chip ${criterionClass(c)}">${esc(c.type)}=${esc(criterionValue(c))}</span>`).join('');
+}
+function flowActionHtml(f) {
+  const treatment = f.treatment || {};
+  const instructions = [
+    ...(treatment.instructions || []),
+    ...(treatment.immediate || []),
+    ...(treatment.deferred || [])
+  ];
+  const hasController = instructions.some(i =>
+    i.type === 'OUTPUT' && String(i.port).toUpperCase() === 'CONTROLLER'
+  );
+  if (hasController) {
+    return '<span class="chip action">CONTROLLER</span><span class="hint">Packet-in hacia ONOS</span>';
+  }
+  if (instructions.length === 0) {
+    return '<span class="chip drop">DROP</span>';
+  }
+  return instructions.map(i => {
+    if (i.type === 'OUTPUT') {
+      const port = String(i.port).toUpperCase();
+      if (port === 'CONTROLLER') return '<span class="chip action">CONTROLLER</span>';
+      return `<span class="chip action">OUTPUT:${esc(i.port)}</span>`;
+    }
+    if (i.type === 'TABLE') return `<span class="chip action">GOTO:T${esc(i.tableId)}</span>`;
+    if (i.type === 'L2MODIFICATION') return `<span class="chip action">${esc(i.subtype)}${i.vlanId ? ':' + esc(i.vlanId) : ''}</span>`;
+    return `<span class="chip action">${esc(i.type)}</span>`;
+  }).join('');
+}
+function criteriaMap(f) {
+  const m = {};
+  (f.selector || []).forEach(c => { m[c.type] = c; });
+  return m;
+}
+function hasAction(f, type) {
+  return ((f.treatment || {}).instructions || []).some(i => i.type === type);
+}
+function actionTable(f) {
+  const item = ((f.treatment || {}).instructions || []).find(i => i.type === 'TABLE');
+  return item ? String(item.tableId) : '';
+}
+function flowKind(f) {
+  const c = criteriaMap(f);
+  const table = String(f.tableId);
+  const prio = Number(f.priority || 0);
+  const src = (c.IPV4_SRC || {}).ip || '';
+  const dst = (c.IPV4_DST || {}).ip || '';
+  const tcpSrc = (c.TCP_SRC || {}).tcpPort;
+  const tcpDst = (c.TCP_DST || {}).tcpPort;
+  const treatment = f.treatment || {};
+  const instructions = [
+    ...(treatment.instructions || []),
+    ...(treatment.immediate || []),
+    ...(treatment.deferred || [])
+  ];
+  const hasController = instructions.some(i =>
+    i.type === 'OUTPUT' && String(i.port).toUpperCase() === 'CONTROLLER'
+  );
+  if (hasController) return {kind: 'control', label: 'Controller', detail: 'Packet-in hacia ONOS'};
+  if (instructions.length === 0 && prio >= 1000) {
+    return {kind: 'mitigacion_drop', label: 'Mitigacion/drop', detail: 'Bloquea trafico antes de que avance'};
+  }
+  if (table === '0' && prio >= 40000) return {kind: 'control', label: 'Control', detail: 'ARP/DHCP/LLDP/BDDP hacia ONOS'};
+  if (hasAction(f, 'TABLE') && prio === 0) return {kind: 'miss_goto', label: 'Miss/goto', detail: 'Fallback hacia T' + actionTable(f)};
+  if (dst.includes('192.168.100.110') && String(tcpDst) === '8282') return {kind: 'portal_ida', label: 'Portal ida', detail: 'Host hacia portal cautivo'};
+  if (src.includes('192.168.100.110') && String(tcpSrc) === '8282') return {kind: 'portal_vuelta', label: 'Portal vuelta', detail: 'Portal responde al host'};
+  if (table === '1' && prio === 39900 && hasAction(f, 'TABLE')) return {kind: 'sesion_usuario', label: 'Sesion usuario', detail: 'Marca VLAN logica y pasa a T2'};
+  const srcIsAcademicServer = academicServers.some(ip => src.includes(ip));
+  const dstIsAcademicServer = academicServers.some(ip => dst.includes(ip));
+  if ((table === '2' || table === '3') && srcIsAcademicServer) return {kind: 'academico_vuelta', label: 'Academico vuelta', detail: 'Servidor responde al host'};
+  if ((table === '2' || table === '3') && dstIsAcademicServer) return {kind: 'academico_ida', label: 'Academico ida', detail: 'Host hacia curso/notas'};
+  if (table === '0' && srcIsAcademicServer) return {kind: 'academico_vuelta', label: 'Troncal vuelta', detail: 'Transporte agregado servidor -> usuarios'};
+  if (table === '0' && dstIsAcademicServer) return {kind: 'academico_ida', label: 'Troncal ida', detail: 'Transporte agregado usuarios -> servidor'};
+  return {kind: 'otro', label: 'Otro', detail: 'Flow auxiliar o compartida'};
+}
+function flowKindHtml(f) {
+  const info = flowKind(f);
+  const klass = info.kind.includes('vuelta') ? 'src' : info.kind.includes('ida') ? 'dst' : info.kind.includes('drop') ? 'drop' : 'action';
+  return `<span class="chip ${klass}">${esc(info.label)}</span><span class="hint">${esc(info.detail)}</span>`;
+}
+function sortFlows(items) {
+  const mode = document.getElementById('flowSort').value;
+  const n = x => Number(x || 0);
+  const cmp = {
+    priority_desc: (a,b) => n(b.priority) - n(a.priority),
+    priority_asc: (a,b) => n(a.priority) - n(b.priority),
+    table_asc: (a,b) => n(a.tableId) - n(b.tableId) || n(b.priority) - n(a.priority),
+    packets_desc: (a,b) => n(b.packets) - n(a.packets),
+    life_desc: (a,b) => n(b.life) - n(a.life)
+  }[mode] || ((a,b) => n(b.priority) - n(a.priority));
+  return [...items].sort(cmp);
+}
+async function api(path, opts={}) {
+  const token = tokenInput.value.trim();
+  if (!token) throw new Error('falta token');
+  sessionStorage.setItem('m6Token', token);
+  const res = await fetch(path, {...opts, headers: {...(opts.headers || {}), ...h()}});
+  if (!res.ok) throw new Error(path + ' HTTP ' + res.status);
+  return res.json();
+}
+function activate(view) {
+  state.view = view;
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+  document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === view));
+  load();
+}
+document.querySelectorAll('.tab').forEach(b => b.onclick = () => activate(b.dataset.view));
+document.getElementById('refresh').onclick = () => load(true);
+document.getElementById('refreshRate').onchange = schedule;
+document.getElementById('mitigationFilter').oninput = renderMitigations;
+document.getElementById('flowFilter').oninput = renderFlows;
+document.getElementById('flowKind').onchange = renderFlows;
+document.getElementById('flowSort').onchange = renderFlows;
+document.getElementById('flowMinPriority').oninput = renderFlows;
+document.getElementById('flowDevice').onchange = () => load(true);
+document.getElementById('flowTable').onchange = () => load(true);
+document.getElementById('loadEvents').onclick = () => load(true);
+document.getElementById('ensurePortal').onclick = async () => {
+  try { await api('/m6/portal/sync?force=1', {method: 'POST'}); setStatus('Portal reasegurado.'); await load(true); }
+  catch (e) { setStatus('Error: ' + e.message); }
+};
+async function load(force=false) {
+  try {
+    if (state.view === 'summary') {
+      const data = await api('/m6/dashboard/summary'); state.data.summary = data; renderSummary(data);
+      const sel = document.getElementById('flowDevice');
+      if (sel.options.length === 1) data.devices.forEach(d => sel.insertAdjacentHTML('beforeend', `<option value="${esc(d)}">${esc(swLabel(d))} (${esc(d.slice(-4))})</option>`));
+    } else if (state.view === 'portal') {
+      const data = await api('/m6/dashboard/portal'); state.data.portal = data; renderPortal(data);
+    } else if (state.view === 'sessions') {
+      const data = await api('/m6/dashboard/sessions'); state.data.sessions = data; renderSessions(data);
+    } else if (state.view === 'mitigations') {
+      const data = await api('/m6/security/mitigations?active=0'); state.data.mitigations = data.mitigations || []; renderMitigations();
+    } else if (state.view === 'flows') {
+      const dev = document.getElementById('flowDevice').value;
+      const table = document.getElementById('flowTable').value;
+      const qs = new URLSearchParams({limit: '250'}); if (dev) qs.set('device', dev); if (table) qs.set('table', table);
+      const data = await api('/m6/dashboard/flows?' + qs); state.data.flows = data.flows || []; renderFlows();
+    } else if (state.view === 'events') {
+      const q = document.getElementById('eventFilter').value.trim();
+      const qs = new URLSearchParams({limit: '160'}); if (q) qs.set('contains', q);
+      const data = await api('/m6/dashboard/events?' + qs); document.getElementById('eventLog').textContent = (data.events || []).join('\n');
+    }
+    setStatus('OK ' + new Date().toLocaleTimeString());
+  } catch (e) { setStatus('Error: ' + e.message); }
+}
+function renderSummary(d) {
+  document.getElementById('summaryGrid').innerHTML = [
+    metric('M6', d.status, 'ok'), metric('Switches ONOS', d.devices_count),
+    metric('Sesiones', d.sessions_count), metric('Portal hosts', d.portal_hosts_count),
+    metric('Mitigaciones activas', d.active_mitigations_count, d.active_mitigations_count ? 'bad' : 'ok'),
+    metric('Portal sync', d.portal_sync_interval + 's'), metric('Vuelta portal', d.portal_return_timeout + 's'),
+    metric('T1 sesión', d.session_idle_timeout + 's'), metric('T2/T3 datos', d.data_flow_timeout + 's'),
+    metric('ONOS writes', d.onos_writes_enabled ? 'ON' : 'OFF', d.onos_writes_enabled ? 'ok' : 'warn')
+  ].join('');
+  document.getElementById('summaryRaw').textContent = JSON.stringify(d, null, 2);
+}
+function renderPortal(d) {
+  document.getElementById('portalGrid').innerHTML = [
+    metric('IP portal', d.portal_ip), metric('Ida permanente', (d.portal_forward || []).some(f => f.isPermanent) ? 'SI' : 'NO'),
+    metric('Flows ida', (d.portal_forward || []).length), metric('Flows vuelta', (d.portal_return || []).length),
+    metric('Hosts portal', (d.portal_hosts || []).length), metric('Sync', d.sync_interval + 's')
+  ].join('');
+  const rows = [...(d.portal_forward || []).map(f => ['ida', f]), ...(d.portal_return || []).map(f => ['vuelta', f])];
+  document.getElementById('portalRows').innerHTML = rows.map(([type, f]) => `<tr><td>${type}</td><td><strong>${esc(swLabel(f.deviceId))}</strong><br><code>${esc(f.deviceId)}</code></td><td>${flowMatchHtml(f)}</td><td>${flowActionHtml(f)}</td><td>${f.isPermanent}</td><td>${f.timeout}</td><td>${f.packets || 0}</td></tr>`).join('');
+}
+function renderSessions(d) {
+  document.getElementById('sessionRows').innerHTML = (d.sessions || []).map(s => `<tr><td><code>${esc(s.mac)}</code></td><td><code>${esc((s.ips || []).join(', '))}</code></td><td><strong>${esc(swLabel(s.switch_dpid))}</strong><br>port ${esc(s.in_port || '-')}</td><td>${esc(s.vlan || '-')}</td><td>${s.session_gate_present ? '<span class="badge ok">OK</span>' : '<span class="badge warn">NO</span>'}</td><td>${s.session_flows}</td><td><code>${esc(s.portal_ip || '-')}</code></td></tr>`).join('');
+}
+function renderMitigations() {
+  const q = document.getElementById('mitigationFilter').value.toLowerCase();
+  const items = (state.data.mitigations || []).filter(x => JSON.stringify(x).toLowerCase().includes(q));
+  document.getElementById('mitigationRows').innerHTML = items.map(m => `<tr><td>${m.active ? '<span class="badge bad">ACTIVE</span>' : '<span class="badge">EXPIRED</span>'}</td><td><code>${esc(m.src_ip || '-')}</code><br><code>${esc(m.src_mac || '-')}</code></td><td>${esc(m.sid || '-')}</td><td>${esc(m.mitigation_action || '-')}</td><td><code>${esc((m.dst_ip || '') + (m.dst_port ? ':' + m.dst_port : ''))}</code></td><td>${esc(m.remaining_human || '-')}</td><td><code>${esc((m.flow_ids || []).join(', '))}</code></td><td><button class="danger" ${m.active ? '' : 'disabled'} onclick="unmitigate('${esc(m.incident_id)}')">Levantar</button></td></tr>`).join('');
+}
+async function unmitigate(id) { if (!id || !confirm('Levantar mitigacion?')) return; await api('/m6/security/unmitigate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({incident_id:id})}); await load(true); }
+window.unmitigate = unmitigate;
+function renderFlows() {
+  const q = document.getElementById('flowFilter').value.toLowerCase();
+  const kind = document.getElementById('flowKind').value;
+  const minPrioRaw = document.getElementById('flowMinPriority').value;
+  const minPrio = minPrioRaw === '' ? null : Number(minPrioRaw);
+  let items = (state.data.flows || []).filter(f => {
+    const info = flowKind(f);
+    if (kind && info.kind !== kind) return false;
+    if (minPrio !== null && Number(f.priority || 0) < minPrio) return false;
+    return JSON.stringify(f).toLowerCase().includes(q)
+      || info.label.toLowerCase().includes(q)
+      || info.detail.toLowerCase().includes(q)
+      || swLabel(f.deviceId).toLowerCase().includes(q);
+  });
+  items = sortFlows(items);
+  document.getElementById('flowRows').innerHTML = items.map(f => `<tr><td><strong>${esc(swLabel(f.deviceId))}</strong><br><code>${esc(f.deviceId)}</code></td><td>T${esc(f.tableId)}</td><td>${esc(f.priority)}</td><td>${flowKindHtml(f)}</td><td>${esc(f.state || '-')}</td><td>${flowMatchHtml(f)}</td><td>${flowActionHtml(f)}</td><td>${esc(f.packets || 0)}</td><td>${f.isPermanent ? 'perm' : esc(f.timeout || '-')}</td></tr>`).join('');
+}
+function schedule() {
+  if (state.timer) clearInterval(state.timer);
+  const ms = Number(document.getElementById('refreshRate').value);
+  if (ms > 0) state.timer = setInterval(() => load(), ms);
+}
+schedule(); load();
+</script>
+</body>
+</html>"""
+    return Response(html, mimetype="text/html")
 
 
 @app.route("/m6/security/dashboard", methods=["GET"])
@@ -3290,7 +4030,7 @@ def endpoint_status():
         now = time.time()
         t0_shared_flows = sum(
             1 for _, _, expires_at in m6.flows_t0_shared.values()
-            if expires_at > now
+            if expires_at is None or expires_at > now
         )
     return jsonify({
         "status":           "ok",
@@ -3333,6 +4073,9 @@ if __name__ == "__main__":
     if Config.MONITORING_GRE_INSTALL_ON_STARTUP:
         print("[M6] Asegurando flows GRE de monitoreo al arranque")
         print(f"[M6] monitoring_gre={m6.asegurar_monitoring_gre()}")
+    if Config.SESSION_CLEANUP_ON_STARTUP:
+        print("[M6] Limpiando session gates T1 huérfanos al arranque")
+        print(f"[M6] session_cleanup={m6.cleanup_session_gates_huerfanos()}")
 
     m6.iniciar_sincronizador_portal()
 
