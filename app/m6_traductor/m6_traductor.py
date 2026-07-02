@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 m6_traductor.py — Módulo Traductor SDN PUCP | Grupo 2 TEL354
 Mark V (base) + ajustes de integración M1 (Sheila J)
@@ -52,6 +52,13 @@ try:
 except ImportError:
     MYSQL_OK = False
 
+from observability import (Observability,TelemetryConfig, Events)
+
+obsConfig = TelemetryConfig(
+    service_name="m6-traductor",
+    service_version="1.0.0",
+)
+obs = Observability(obsConfig)
 
 #  Configuración base
 class Config:
@@ -758,6 +765,10 @@ class PolicyEngine:
                 "roles":   [nombre_rol]
             }
         }
+        obs.event(
+            Events.POLICY_QUERY,
+            attributes={"peer.module": "m2-policy" , "opa.payload": opa_payload},
+        )
         try:
             resp = requests.post(Config.OPA_URL, json=opa_payload, timeout=3)
             if resp.status_code == 200:
@@ -766,7 +777,19 @@ class PolicyEngine:
                 if m2_permisos is not None:
                     print(f"  [PolicyEngine] Políticas desde OPA M2 "
                           f"({len(m2_permisos)} permisos)")
-                    return self._convertir_permisos_m2(m2_permisos, vlan_id)
+                    nombres,ids,politicas = self._convertir_permisos_m2(m2_permisos, vlan_id)
+                    permisos = politicas.get("permisos", [])
+                    denegaciones = politicas.get("denegaciones", [])
+                    obs.event(
+                        Events.POLICY_QUERY_RESULT,
+                        attributes={"peer.module": "m2-policy",
+                                    "opa.allowed_services.names": nombres,
+                                    "opa.allowed_services.ids": ids,
+                                    "opa.allowed_services.count": len(permisos),
+                                    "opa.denied_services.count": len(denegaciones),},
+                    )
+                    return politicas
+                
         except Exception as e:
             print(f"  [PolicyEngine] OPA no disponible: {e}")
 
@@ -784,6 +807,8 @@ class PolicyEngine:
         return Config.get_ip_mapping_m2().get(ip_raw, ip_raw)
 
     def _convertir_permisos_m2(self, m2_permisos, vlan_id):
+        nombres_rcs = []
+        ids_rcs = []
         allow_map = {}
         for p in m2_permisos:
             recurso = p.get("recurso", {})
@@ -797,6 +822,10 @@ class PolicyEngine:
                 or recurso.get("ip_servidor")
                 or ""
             )
+            recurso_nombre = recurso.get("nombre", "")
+            nombres_rcs.append(recurso_nombre)
+            recurso_id = recurso.get("id_recurso")
+            ids_rcs.append(recurso_id)
             puerto  = recurso.get("puerto")
             if not ip_raw or puerto is None:
                 continue
@@ -819,7 +848,7 @@ class PolicyEngine:
         denegaciones = [{"ip_dst": ip, "puertos": [80, 443]}
                         for ip in sorted(denied_ips)]
 
-        return {"permisos": permisos, "denegaciones": denegaciones}
+        return nombres_rcs, ids_rcs,{"permisos": permisos, "denegaciones": denegaciones}
 
     def _desde_mysql(self, nombre_rol):
         if not MYSQL_OK or not nombre_rol:
@@ -2401,7 +2430,8 @@ class M6Translator:
                 "switch_dpid": switch_dpid
             }
         }
-        politicas = self.policies.get_policies(payload_opa)
+        with obs.span("policy.decision"):
+            politicas = self.policies.get_policies(payload_opa)
 
         # 2. Instalar flows de política
         n_allow, n_deny = 0, 0
@@ -2414,13 +2444,32 @@ class M6Translator:
         n_pipeline = self._asegurar_pipeline_fallback_en_borde(switch_dpid)
         if n_pipeline:
             print(f"    ✓ Pipeline T0→T1→T2→T3→T4 base — {n_pipeline} flows")
-        session_gate = self._instalar_session_gate(
-            mac, switch_dpid, in_port, vlan_id, ip_src=ip_asignada
-        )
-        if session_gate:
-            print(
-                f"    ✓ T1 session gate — idle {Config.SESSION_IDLE_TIMEOUT}s"
+        with obs.span("flow.installation"):
+            obs.event(
+                Events.FLOW_INSTALL_REQUESTED,
+                attributes={
+                    "flow.table": "T1",
+                    "flow.mac": mac,
+                    "flow.ip": ip_asignada,
+                    "flow.switch": switch_dpid,
+                    "flow.vlan": vlan_id,
+                }
             )
+            session_gate = self._instalar_session_gate(
+                mac, switch_dpid, in_port, vlan_id, ip_src=ip_asignada
+            )
+            if session_gate:
+                print(
+                    f"    ✓ T1 session gate — idle {Config.SESSION_IDLE_TIMEOUT}s"
+                )
+                obs.event(
+                    Events.FLOW_INSTALLED,
+                    attributes={
+                        "flow.ip": ip_asignada,
+                        "flow.switch": switch_dpid,
+                        "flow.idle_timeout": Config.SESSION_IDLE_TIMEOUT,
+                    }
+                )
         # T0 ya tiene el fallback general tcp -> T1. No instalamos
         # clasificadores por host en T0 para mantener la tabla limpia.
 
@@ -2566,13 +2615,29 @@ class M6Translator:
         Elimina todos los flows de la sesión (T1, T3, T0 ALLOW/DENY por MAC).
         Llamado por M1 al hacer logout.
         """
+        ids_flows = []
+        ids_devices = []
         mac = mac.lower()
         with self._lock:
             flows = self.flows_por_sesion.pop(mac, [])
             self.session_gates.pop(mac, None)
         print(f"\n[M6] Cerrando sesión MAC={mac} — {len(flows)} flows")
-        for device_id, flow_id in flows:
-            self.onos.eliminar_flow(device_id, flow_id)
+        with obs.span("flow.elimination"):
+            for device_id, flow_id in flows:
+                ids_flows.append(flow_id)
+                ids_devices.append(device_id)
+                self.onos.eliminar_flow(device_id, flow_id)
+
+            obs.event(
+                Events.FLOW_REMOVED,
+                attributes={
+                    "user.mac": mac,
+                    "devices.ids":ids_devices,
+                    "flow.ids": ids_flows,
+                    "flow.count": len(flows),
+                }
+            )
+           
         self.logger.log({
             "modulo":           "M6",
             "evento":           "sesion_cerrada",
@@ -3296,6 +3361,13 @@ def endpoint_token_rol():
                   "ip_asignada", "mac", "switch_dpid", "in_port"):
         if campo not in token:
             return jsonify({"error": f"falta campo: {campo}"}), 400
+    
+    obs.update_context(
+        context_id=str(uuid4()),
+        host_ip=token.get("ip_asignada"),
+        user_code=token.get("codigo_pucp"),
+        user_role=token.get("nombre_rol"))
+
     resultado = m6.procesar_token_rol(token)
     if resultado:
         return jsonify(resultado), 200
@@ -3305,6 +3377,7 @@ def endpoint_token_rol():
 @app.route("/m6/cerrar_sesion", methods=["POST"])
 def endpoint_cerrar_sesion():
     """M1 llama aquí al cerrar sesión del usuario."""
+    obs.update_context(context_id=str(uuid4()))
     data = request.json or {}
     mac  = data.get("mac")
     if not mac:
