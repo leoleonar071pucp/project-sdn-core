@@ -8,7 +8,7 @@ Ejecutar en VM-Auth: python3 -u web.py
 """
 from flask import Flask, request, jsonify, render_template_string
 
-from m1_auth import Config, autenticar, autenticar_visitante, cerrar_sesion, \
+from m1_auth_pasado_estable import Config, autenticar, autenticar_visitante, cerrar_sesion, \
     obtener_recursos_permitidos, obtener_sesion_actual, obtener_recursos_sesion, \
     solicitar_jp, historial_jp, listar_solicitudes_jp, resolver_solicitud_jp
 
