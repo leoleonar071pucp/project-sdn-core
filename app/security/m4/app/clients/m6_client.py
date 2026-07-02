@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -10,6 +11,8 @@ from ..models import (
     SecurityAction,
     SecurityIncident,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class M6Client:
@@ -46,26 +49,51 @@ class M6Client:
         payload = {
             "incident_id": incident.incident_id,
             "accion": action.value,
-            "ip_atacante": incident.src_ip,
-            "mac_atacante": incident.src_mac,
+            "source": "m4",
+            "src_ip": incident.src_ip,
+            "src_mac": incident.src_mac,
             "switch_dpid": incident.switch_dpid,
             "in_port": incident.in_port,
             "tipo": incident.threat_type,
-            "prioridad": 50000,
             "ttl_segundos": ttl,
         }
+        if incident.evidence:
+            evidence = incident.evidence[0]
+            metadata = evidence.get("metadata") or {}
+            payload.update(
+                {
+                    "sid": metadata.get("signature_id"),
+                    "signature": metadata.get("signature"),
+                    "dst_ip": evidence.get("dst_ip"),
+                    "dst_port": evidence.get("dst_port"),
+                    "proto": evidence.get("protocol"),
+                }
+            )
         headers = {"X-Security-Token": self.settings.security_token}
         try:
+            logger.info(
+                "requesting_m6_mitigation incident_id=%s action=%s src_ip=%s sid=%s",
+                incident.incident_id,
+                action.value,
+                incident.src_ip,
+                payload.get("sid"),
+            )
             async with httpx.AsyncClient(
                 timeout=self.settings.http_timeout_seconds
             ) as client:
                 response = await client.post(
-                    f"{self.settings.m6_base_url}/m6/mitigacion",
+                    f"{self.settings.m6_base_url}/m6/security/mitigate",
                     json=payload,
                     headers=headers,
                 )
                 response.raise_for_status()
                 body = response.json()
+            logger.info(
+                "m6_mitigation_response incident_id=%s status=%s flow_ids=%s",
+                incident.incident_id,
+                body.get("status"),
+                body.get("flow_ids", []),
+            )
             return ActionResult(
                 incident_id=incident.incident_id,
                 action=action,
@@ -75,6 +103,11 @@ class M6Client:
                 expires_at=body.get("expires_at"),
             )
         except Exception as exc:
+            logger.exception(
+                "m6_mitigation_failed incident_id=%s action=%s",
+                incident.incident_id,
+                action.value,
+            )
             return ActionResult(
                 incident_id=incident.incident_id,
                 action=action,

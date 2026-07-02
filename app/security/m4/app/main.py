@@ -126,3 +126,13 @@ def get_incident(incident_id: str):
     if incident is None:
         raise HTTPException(status_code=404, detail="incident not found")
     return incident
+
+
+@app.post(
+    "/m4/incidents/{incident_id}/expire",
+    dependencies=[Depends(require_security_token)],
+)
+def expire_incident(incident_id: str) -> dict:
+    if not service.mark_incident_expired(incident_id):
+        raise HTTPException(status_code=404, detail="incident not found")
+    return {"ok": True, "incident_id": incident_id, "state": "EXPIRED"}

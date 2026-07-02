@@ -28,8 +28,11 @@ class IncidentState(str, Enum):
     NEW = "NEW"
     WATCHING = "WATCHING"
     MIRRORING = "MIRRORING"
+    MITIGATING = "MITIGATING"
     CONTAINED = "CONTAINED"
     BLOCKED = "BLOCKED"
+    EXPIRED = "EXPIRED"
+    REOPENED = "REOPENED"
     CLOSED = "CLOSED"
 
 
