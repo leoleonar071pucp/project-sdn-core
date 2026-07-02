@@ -209,6 +209,36 @@ def auth_sesion_recursos():
     resultado = obtener_recursos_sesion(request.remote_addr)
     return jsonify(resultado), (200 if resultado.get("ok") else 404)
 
+
+@app.route("/auth/recursos/<nombre_rol>", methods=["GET"])
+def auth_recursos(nombre_rol):
+    """
+    GET /auth/recursos/<nombre_rol>
+
+    Devuelve la lista de recursos permitidos (ALLOW) para un rol, leída directamente de politicas_rbac/recursos/servidores.
+    """
+    recursos = obtener_recursos_permitidos(nombre_rol)
+    return jsonify({"ok": True, "nombre_rol": nombre_rol, "recursos": recursos}), 200
+
+@app.route("/m5/logs", methods=["GET"])
+def proxy_m5_logs():
+    import requests as _req
+    try:
+        params = request.query_string.decode()
+        resp = _req.get(f"http://127.0.0.1:5002/m5/logs?{params}", timeout=10)
+        return jsonify(resp.json()), resp.status_code
+    except Exception as e:
+        return jsonify({"ok": False, "motivo": f"M5 no disponible: {e}"}), 503
+
+@app.route("/m5/metricas", methods=["GET"])
+def proxy_m5_metricas():
+    import requests as _req
+    try:
+        resp = _req.get("http://127.0.0.1:5002/m5/metricas", timeout=10)
+        return jsonify(resp.json()), resp.status_code
+    except Exception as e:
+        return jsonify({"ok": False, "motivo": f"M5 no disponible: {e}"}), 503
+
 # Lgógica para JP / Multi-rol 
 
 @app.route("/jp/solicitar", methods=["POST"])
