@@ -122,19 +122,6 @@ class PortalClient:
             "expiration": expiration, "motivo": motivo,
         })
 
-    # ── M5 (proxy en web.py → mismo puerto 8282) ─────────────────────────
-    def m5_logs(self, evento=None, usuario=None, limite=50):
-        params = f"?limite={limite}"
-        if evento:
-            params += f"&evento={evento}"
-        if usuario:
-            params += f"&usuario={usuario}"
-        return self._get(f"/m5/logs{params}")
-
-    def m5_metricas(self):
-        return self._get("/m5/metricas")
-
-
 def formatear_tiempo(segundos):
     segundos = max(0, int(segundos))
     horas, resto = divmod(segundos, 3600)
@@ -583,10 +570,8 @@ class CaptivePortalCLI:
             elif es_admin:
                 print("  [2] Revisar solicitudes JP pendientes")
                 print("  [3] Revocar permisos JP otorgados")
-                print("  [4] Ver logs de auditoría")
-                print("  [5] Ver métricas del sistema")
-                print("  [6] Cerrar sesión")
-                opciones_validas |= {"2", "3", "4", "5", "6"}
+                print("  [4] Cerrar sesión")
+                opciones_validas |= {"2", "3", "4"}
             else:
                 print("  [2] Cerrar sesión")
                 opciones_validas |= {"2"}
@@ -619,17 +604,12 @@ class CaptivePortalCLI:
                 self._admin_jp_revocar()
 
             elif opcion == "4" and es_admin:
-                self._admin_logs()
+                self._cerrar_sesion_activa(mac, id_usuario, codigo_pucp, ip_asignada, es_visitante)
+                return
             elif opcion == "4" and es_estudiante:
                 self._cerrar_sesion_activa(mac, id_usuario, codigo_pucp, ip_asignada, es_visitante)
                 return
 
-            elif opcion == "5" and es_admin:
-                self._admin_metricas()
-
-            elif opcion == "6" and es_admin:
-                self._cerrar_sesion_activa(mac, id_usuario, codigo_pucp, ip_asignada, es_visitante)
-                return
 
     def _cerrar_sesion_activa(self, mac, id_usuario, codigo_pucp, ip_asignada, es_visitante):
         print("\n")
