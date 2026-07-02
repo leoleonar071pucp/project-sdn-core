@@ -44,7 +44,7 @@ import requests
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 
 try:
     import mysql.connector
@@ -120,6 +120,10 @@ class Config:
     STARTUP_FLOW_INSTALL_ENABLED = env_bool.__func__(
         "STARTUP_FLOW_INSTALL_ENABLED", False
     )
+    MONITORING_GRE_ENABLED = env_bool.__func__("MONITORING_GRE_ENABLED", True)
+    MONITORING_GRE_INSTALL_ON_STARTUP = env_bool.__func__(
+        "MONITORING_GRE_INSTALL_ON_STARTUP", False
+    )
     PORTAL_SYNC_INTERVAL = int(os.getenv("PORTAL_SYNC_INTERVAL", "0"))
     REACTIVE_DATA_FLOWS_ENABLED = env_bool.__func__(
         "REACTIVE_DATA_FLOWS_ENABLED", False
@@ -167,6 +171,28 @@ class Config:
         "of:0000ca126249d546": "SW5",
     }
 
+    MONITORING_GRE_DST = os.getenv("MONITORING_GRE_DST", "192.168.200.213")
+    MONITORING_GRE_FLOWS = [
+        {
+            "name": "sw4_gre_to_sw3",
+            "device_id": "of:00006a0757adfc4e",
+            "in_port": None,
+            "out_port": 4,
+        },
+        {
+            "name": "sw3_gre_to_sw1",
+            "device_id": "of:0000eadb63449748",
+            "in_port": 1,
+            "out_port": 4,
+        },
+        {
+            "name": "sw1_gre_to_monitoring",
+            "device_id": "of:00007e3892af7141",
+            "in_port": 3,
+            "out_port": 5,
+        },
+    ]
+
     # Prioridades OpenFlow (acordadas en diseño de arquitectura)
     PRIO_PORTAL_EDGE_T1 = 40100  # T1: portal cautivo gana al session gate
     PRIO_T2_DATA_ALLOW = 110  # T2: ALLOW real con salida exacta
@@ -174,10 +200,29 @@ class Config:
     PRIO_T3_DENY    = 200     # T3: DROP por sesión
     PRIO_PIPELINE_MISS = 0     # T2/T3/T4: fallback controlado
     PRIO_T0_TRANSPORT = 1000   # T0: transporte agregado en troncales
+    PRIO_T0_MONITORING_GRE = 1000  # T0: tunel GRE hacia monitoreo/M3
     PRIO_T0_USUARIO = 35000   # T0: enforcement por MAC post-auth
     PRIO_T1_SESSION_GATE = 39900  # T1: flow marcador de sesion idle
-    PRIO_T0_ATAQUE  = 5000    # T0: bloqueo atacante (instalado por M4)
+    PRIO_T0_ATAQUE  = 39000   # T0: bloqueo atacante (instalado por M4)
     DATA_FLOW_TIMEOUT = int(os.getenv("DATA_FLOW_TIMEOUT", "300"))
+
+    SECURITY_MITIGATION_POLICIES = {
+        9000001: {"action": "block_tcp_to_dest", "ttl": 300},
+        9000008: {"action": "block_tcp_to_dest", "ttl": 300},
+        9000009: {"action": "block_tcp_to_dest", "ttl": 300},
+        9000010: {"action": "block_tcp_to_dest", "ttl": 300},
+        9000002: {"action": "block_tcp_to_dest_port", "ttl": 900},
+        9000014: {"action": "block_tcp_to_dest_port", "ttl": 900},
+        9000018: {"action": "block_icmp", "ttl": 600},
+        9000027: {"action": "block_tcp_port", "ttl": 600, "dst_port": 22},
+        9000028: {"action": "block_tcp_port", "ttl": 600, "dst_port": 3389},
+        9000029: {"action": "block_tcp_port", "ttl": 600, "dst_port": 21},
+        9000015: {"action": "block_all_ip", "ttl": 900},
+        9000013: {"action": "block_tcp_port", "ttl": 900, "dst_port": 22},
+        9000012: {"action": "block_tcp_port", "ttl": 900, "dst_port": 3389},
+        9000024: {"action": "block_tcp_to_dest_port", "ttl": 900},
+        9000036: {"action": "block_tcp_port", "ttl": 900, "dst_port": 21},
+    }
 
     # VLANs por rol
     VLAN_CUARENTENA = 90
@@ -465,6 +510,30 @@ class FlowBuilder:
             ]}
         }
 
+    def t0_monitoring_gre_flow(self, device_id, out_port, dst_ip=None,
+                               in_port=None):
+        """T0 permanente para transportar el tunel GRE hacia monitoreo/M3."""
+        criteria = [
+            {"type": "ETH_TYPE", "ethType": "0x0800"},
+            {"type": "IP_PROTO", "protocol": 47},
+            {
+                "type": "IPV4_DST",
+                "ip": f"{dst_ip or Config.MONITORING_GRE_DST}/32",
+            },
+        ]
+        if in_port is not None:
+            criteria.insert(0, {"type": "IN_PORT", "port": int(in_port)})
+        return {
+            "priority":    Config.PRIO_T0_MONITORING_GRE,
+            "isPermanent": True,
+            "deviceId":    device_id,
+            "tableId":     0,
+            "selector": {"criteria": criteria},
+            "treatment": {"instructions": [
+                {"type": "OUTPUT", "port": int(out_port)}
+            ]}
+        }
+
     def t0_deny_usuario(self, device_id, mac, ip_dst, session_timeout=28800):
         """Tabla 0 prio35000 — ETH_SRC=MAC + IP_DST → DROP (DENY efectivo)."""
         return {
@@ -569,6 +638,9 @@ class FlowBuilder:
         ip_atacante=None,
         mac_atacante=None,
         in_port=None,
+        dst_ip=None,
+        dst_port=None,
+        proto=None,
         ttl=600,
         prio=None,
     ):
@@ -582,6 +654,15 @@ class FlowBuilder:
             criteria.append({"type": "ETH_SRC", "mac": mac_atacante})
         if ip_atacante:
             criteria.append({"type": "IPV4_SRC", "ip": f"{ip_atacante}/32"})
+        if dst_ip:
+            criteria.append({"type": "IPV4_DST", "ip": f"{dst_ip}/32"})
+        proto_normalized = str(proto or "").upper()
+        if proto_normalized == "ICMP":
+            criteria.append({"type": "IP_PROTO", "protocol": 1})
+        elif proto_normalized == "TCP" or dst_port is not None:
+            criteria.append({"type": "IP_PROTO", "protocol": 6})
+            if dst_port is not None:
+                criteria.append({"type": "TCP_DST", "tcpPort": int(dst_port)})
         return {
             "priority":    prio,
             "isPermanent": False,
@@ -1098,6 +1179,22 @@ class ONOSClient:
     def eliminar_flow(self, device_id, flow_id):
         return self._delete_flow(device_id, flow_id)
 
+    def get_flows(self, device_id):
+        """Devuelve flows crudas de un device ONOS."""
+        if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
+            return []
+        try:
+            resp = requests.get(
+                f"{self.url}/onos/v1/flows/{device_id}",
+                auth=self.auth, timeout=3
+            )
+            if resp.status_code == 200:
+                return resp.json().get("flows", [])
+            print(f"  [ONOS] Error GET /flows/{device_id}: HTTP {resp.status_code}")
+        except Exception as e:
+            print(f"  [ONOS] Error GET /flows/{device_id}: {e}")
+        return []
+
 
 # ─── Lógica principal ─────────────────────────────────────────────────────────
 class M6Translator:
@@ -1140,6 +1237,161 @@ class M6Translator:
         )
         print(f"      selector={detail['selector']}")
         print(f"      treatment={detail['treatment']}")
+
+    @staticmethod
+    def _normalizar_eth_type(value):
+        if isinstance(value, str):
+            value = value.strip().lower()
+            if value.startswith("0x"):
+                return int(value, 16)
+            return int(value)
+        return int(value)
+
+    @staticmethod
+    def _criterios_por_tipo(flow):
+        criterios = flow.get("selector", {}).get("criteria", [])
+        return {c.get("type"): c for c in criterios}
+
+    @staticmethod
+    def _output_port(flow):
+        for ins in flow.get("treatment", {}).get("instructions", []):
+            if ins.get("type") == "OUTPUT":
+                return str(ins.get("port"))
+        return None
+
+    def _flow_equivale_monitoring_gre(self, actual, esperado):
+        if int(actual.get("tableId", -1)) != int(esperado.get("tableId", -2)):
+            return False
+        if int(actual.get("priority", -1)) != int(esperado.get("priority", -2)):
+            return False
+        if self._output_port(actual) != self._output_port(esperado):
+            return False
+
+        actual_c = self._criterios_por_tipo(actual)
+        esperado_c = self._criterios_por_tipo(esperado)
+        for tipo in ("ETH_TYPE", "IP_PROTO", "IPV4_DST"):
+            if tipo not in actual_c or tipo not in esperado_c:
+                return False
+        try:
+            if self._normalizar_eth_type(
+                actual_c["ETH_TYPE"].get("ethType")
+            ) != self._normalizar_eth_type(esperado_c["ETH_TYPE"].get("ethType")):
+                return False
+            if int(actual_c["IP_PROTO"].get("protocol")) != int(
+                esperado_c["IP_PROTO"].get("protocol")
+            ):
+                return False
+        except (TypeError, ValueError):
+            return False
+
+        if actual_c["IPV4_DST"].get("ip") != esperado_c["IPV4_DST"].get("ip"):
+            return False
+        esperado_in = esperado_c.get("IN_PORT")
+        actual_in = actual_c.get("IN_PORT")
+        if esperado_in is None:
+            return actual_in is None
+        if actual_in is None:
+            return False
+        return str(actual_in.get("port")) == str(esperado_in.get("port"))
+
+    def _monitoring_gre_specs(self):
+        specs = []
+        for item in Config.MONITORING_GRE_FLOWS:
+            flow = self.builder.t0_monitoring_gre_flow(
+                item["device_id"],
+                item["out_port"],
+                dst_ip=Config.MONITORING_GRE_DST,
+                in_port=item.get("in_port"),
+            )
+            specs.append({**item, "flow": flow})
+        return specs
+
+    def estado_monitoring_gre(self):
+        if not Config.MONITORING_GRE_ENABLED:
+            return {"ok": True, "disabled": True, "flows": []}
+        if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
+            return {
+                "ok": True,
+                "status": "SIMULATED",
+                "disabled": True,
+                "reason": "onos_reads_disabled",
+                "flows": [],
+            }
+
+        flows_por_device = {}
+        resultados = []
+        for spec in self._monitoring_gre_specs():
+            device_id = spec["device_id"]
+            flows_por_device.setdefault(device_id, self.onos.get_flows(device_id))
+            match = next(
+                (
+                    f for f in flows_por_device[device_id]
+                    if self._flow_equivale_monitoring_gre(f, spec["flow"])
+                    and f.get("state") in (None, "ADDED")
+                ),
+                None,
+            )
+            resultados.append({
+                "name": spec["name"],
+                "device_id": device_id,
+                "present": bool(match),
+                "flow_id": match.get("id") if match else None,
+                "in_port": spec.get("in_port"),
+                "out_port": spec["out_port"],
+                "dst_ip": f"{Config.MONITORING_GRE_DST}/32",
+            })
+        return {"ok": True, "flows": resultados}
+
+    def asegurar_monitoring_gre(self):
+        if not Config.MONITORING_GRE_ENABLED:
+            return {
+                "ok": True,
+                "disabled": True,
+                "reason": "monitoring_gre_disabled",
+                "installed": [],
+                "already_present": [],
+                "failed": [],
+            }
+        if not (
+            Config.NETWORK_ACTIONS_ENABLED
+            and Config.ONOS_READS_ENABLED
+            and Config.ONOS_WRITES_ENABLED
+        ):
+            return {
+                "ok": True,
+                "status": "SIMULATED",
+                "disabled": True,
+                "reason": "onos_reads_or_writes_disabled",
+                "installed": [],
+                "already_present": [],
+                "failed": [],
+            }
+
+        flows_por_device = {}
+        installed, already_present, failed = [], [], []
+        for spec in self._monitoring_gre_specs():
+            device_id = spec["device_id"]
+            flows_por_device.setdefault(device_id, self.onos.get_flows(device_id))
+            existe = any(
+                self._flow_equivale_monitoring_gre(f, spec["flow"])
+                and f.get("state") in (None, "ADDED")
+                for f in flows_por_device[device_id]
+            )
+            if existe:
+                already_present.append(spec["name"])
+                continue
+            flow_id = self.onos.instalar_flow(device_id, spec["flow"])
+            if flow_id:
+                installed.append(spec["name"])
+                flows_por_device[device_id] = self.onos.get_flows(device_id)
+            else:
+                failed.append(spec["name"])
+        return {
+            "ok": not failed,
+            "installed": installed,
+            "already_present": already_present,
+            "failed": failed,
+        }
 
     def _instalar_y_cachear(self, device_id, flow_entry, mac=None):
         """Instala un flow y lo registra en el cache de sesión si se provee mac."""
@@ -1824,6 +2076,16 @@ class M6Translator:
         except Exception as exc:
             print(f"[M6] No se pudo enviar evento a M4: {exc}")
 
+    def _marcar_incidente_m4_expirado(self, incident_id):
+        try:
+            requests.post(
+                f"{Config.M4_URL}/m4/incidents/{incident_id}/expire",
+                headers={"X-Security-Token": Config.SECURITY_TOKEN},
+                timeout=3,
+            ).raise_for_status()
+        except Exception as exc:
+            print(f"[M6] No se pudo marcar incidente M4 expirado: {exc}")
+
     def procesar_packet_in(self, data):
         required = (
             "src_ip",
@@ -2305,6 +2567,177 @@ class M6Translator:
 
     # ── Mitigación de ataques (M4) ────────────────────────────────────────────
 
+    def _buscar_sesion_db_por_ip(self, ip):
+        if not (Config.MYSQL_SECURITY_READS_ENABLED and MYSQL_OK):
+            return None
+        try:
+            conn = mysql.connector.connect(
+                host=Config.MYSQL_HOST,
+                user=Config.MYSQL_USER,
+                password=Config.MYSQL_PASS,
+                database=Config.MYSQL_DB,
+                connection_timeout=3,
+            )
+            cur = conn.cursor(dictionary=True)
+            cur.execute(
+                """
+                SELECT s.*, u.codigo_pucp
+                FROM sesiones_activas s
+                LEFT JOIN usuarios u ON u.id_usuario=s.id_usuario
+                WHERE s.ip_asignada=%s
+                  AND s.estado='ACTIVA'
+                ORDER BY s.login_timestamp DESC
+                LIMIT 1
+                """,
+                (ip,),
+            )
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            return row
+        except Exception as exc:
+            print(f"[M6] Error buscando sesion activa por IP {ip}: {exc}")
+            return None
+
+    def _resolver_contexto_mitigacion(self, alerta):
+        src_ip = alerta.get("src_ip") or alerta.get("ip_atacante")
+        if not src_ip:
+            return None
+
+        if alerta.get("simulated_session"):
+            src_mac = alerta.get("src_mac") or alerta.get("mac_atacante")
+            switch_dpid = alerta.get("switch_dpid")
+            in_port = alerta.get("in_port")
+            if src_mac and switch_dpid and in_port is not None:
+                return {
+                    "ip_asignada": src_ip,
+                    "mac_address": src_mac,
+                    "switch_dpid": switch_dpid,
+                    "in_port": int(in_port),
+                    "codigo_pucp": alerta.get("codigo_pucp", "SIMULATED"),
+                }
+
+        session = self._buscar_sesion_db_por_ip(src_ip)
+        if session:
+            return session
+        return None
+
+    def _normalizar_politica_mitigacion(self, alerta):
+        sid = alerta.get("sid") or alerta.get("signature_id")
+        try:
+            sid = int(sid) if sid is not None else None
+        except (TypeError, ValueError):
+            sid = None
+        policy = Config.SECURITY_MITIGATION_POLICIES.get(sid)
+        explicit_action = alerta.get("mitigation_action")
+        if not policy and not explicit_action:
+            return sid, None, None, None
+        policy = dict(policy or {})
+        action = str(explicit_action or policy["action"])
+        ttl = int(alerta.get("ttl_segundos") or policy.get("ttl", 600))
+        dst_port = alerta.get("dst_port") or policy.get("dst_port")
+        return sid, action, ttl, dst_port
+
+    def procesar_alerta_seguridad(self, alerta):
+        """
+        Recibe una alerta normalizada de M4/Suricata, resuelve la sesión activa
+        por IP origen y aplica un DROP T0 solo en el switch de borde usuario.
+        """
+        incident_id = alerta.get("incident_id") or str(uuid4())
+        src_ip = alerta.get("src_ip") or alerta.get("ip_atacante")
+        if not src_ip:
+            return {"ok": False, "error": "falta src_ip"}
+
+        session = self._resolver_contexto_mitigacion(alerta)
+        if not session:
+            return {
+                "ok": False,
+                "error": "sesion activa no encontrada para src_ip",
+                "src_ip": src_ip,
+            }
+
+        sid, action, ttl, dst_port = self._normalizar_politica_mitigacion(alerta)
+        if not action:
+            return {
+                "ok": False,
+                "error": "sid no soportado para mitigacion",
+                "sid": sid,
+            }
+
+        dst_ip = alerta.get("dst_ip")
+        proto = str(alerta.get("proto") or alerta.get("protocol") or "").upper()
+        if action == "block_icmp":
+            proto, dst_ip, dst_port = "ICMP", None, None
+        elif action == "block_tcp_port":
+            proto, dst_ip = "TCP", None
+        elif action == "block_tcp_to_dest":
+            proto, dst_port = "TCP", None
+        elif action == "block_tcp_to_dest_port":
+            proto = "TCP"
+        elif action == "block_all_ip":
+            proto, dst_ip, dst_port = None, None, None
+
+        switch_dpid = session.get("switch_dpid")
+        in_port = session.get("in_port")
+        mac = session.get("mac_address")
+        if not switch_dpid or in_port is None or not mac:
+            return {
+                "ok": False,
+                "error": "sesion activa incompleta para mitigacion",
+                "src_ip": src_ip,
+            }
+
+        flow = self.builder.t0_bloqueo_ataque(
+            switch_dpid,
+            ip_atacante=src_ip,
+            mac_atacante=mac,
+            in_port=int(in_port),
+            dst_ip=dst_ip,
+            dst_port=dst_port,
+            proto=proto,
+            ttl=ttl,
+            prio=int(alerta.get("prioridad") or Config.PRIO_T0_ATAQUE),
+        )
+        flow_id = self.onos.instalar_flow(switch_dpid, flow)
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl)
+        status = (
+            "EXECUTED"
+            if Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_WRITES_ENABLED
+            else "SIMULATED"
+        )
+        result = {
+            "ok": bool(flow_id),
+            "incident_id": incident_id,
+            "action_id": str(uuid4()),
+            "status": status,
+            "sid": sid,
+            "mitigation_action": action,
+            "flow_ids": [flow_id] if flow_id else [],
+            "devices": [switch_dpid] if flow_id else [],
+            "flows": [flow] if flow_id else [],
+            "src_ip": src_ip,
+            "src_mac": mac,
+            "switch_dpid": switch_dpid,
+            "in_port": int(in_port),
+            "expires_at": expires_at.isoformat(),
+        }
+        with self._lock:
+            self.mitigaciones[incident_id] = {**result, "active": True}
+        self.logger.log({
+            "modulo": "M6",
+            "evento": "security_mitigation_applied",
+            "incident_id": incident_id,
+            "sid": sid,
+            "action": action,
+            "src_ip": src_ip,
+            "mac": mac,
+            "switch_dpid": switch_dpid,
+            "in_port": int(in_port),
+            "ttl": ttl,
+            "status": status,
+        })
+        return result
+
     def procesar_mitigacion(self, directiva):
         """
         Construye o instala un DROP T0, según los interruptores de seguridad.
@@ -2396,11 +2829,52 @@ class M6Translator:
                 if Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_WRITES_ENABLED
                 else "SIMULATED"
             )
+        threading.Thread(
+            target=self._marcar_incidente_m4_expirado,
+            args=(incident_id,),
+            daemon=True,
+        ).start()
         return {
             "ok": success,
             "incident_id": incident_id,
             "status": mitigation["unblock_status"],
         }
+
+    @staticmethod
+    def _parse_iso_datetime(value):
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    def listar_mitigaciones(self, active_only=False):
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            mitigations = [dict(item) for item in self.mitigaciones.values()]
+        enriched = []
+        for item in mitigations:
+            expires_at = self._parse_iso_datetime(item.get("expires_at"))
+            active = bool(item.get("active"))
+            remaining = None
+            if expires_at:
+                remaining = max(0, int((expires_at - now).total_seconds()))
+                if remaining == 0:
+                    active = False
+            item["active"] = active
+            item["state"] = "ACTIVE" if active else "EXPIRED"
+            item["remaining_seconds"] = remaining
+            if remaining is None:
+                item["remaining_human"] = "-"
+            else:
+                minutes, seconds = divmod(remaining, 60)
+                item["remaining_human"] = f"{minutes:02d}:{seconds:02d}"
+            enriched.append(item)
+        if active_only:
+            enriched = [item for item in enriched if item.get("active")]
+        return enriched
 
     def estado_host(self, ip=None, mac=None):
         with self._lock:
@@ -2544,6 +3018,38 @@ def endpoint_unblock():
     return jsonify(result), 200 if result.get("ok") else 404
 
 
+@app.route("/m6/security/mitigate", methods=["POST"])
+def endpoint_security_mitigate():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    alerta = request.json or {}
+    result = m6.procesar_alerta_seguridad(alerta)
+    if result.get("ok"):
+        return jsonify(result), 200
+    status_code = 404 if "sesion activa" in result.get("error", "") else 400
+    return jsonify(result), status_code
+
+
+@app.route("/m6/security/unmitigate", methods=["POST"])
+def endpoint_security_unmitigate():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    incident_id = (request.json or {}).get("incident_id")
+    if not incident_id:
+        return jsonify({"error": "falta incident_id"}), 400
+    result = m6.deshacer_mitigacion(incident_id)
+    return jsonify(result), 200 if result.get("ok") else 404
+
+
+@app.route("/m6/security/mitigations", methods=["GET"])
+def endpoint_security_mitigations():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    active_only = str(request.args.get("active", "")).lower() in {"1", "true", "yes"}
+    mitigations = m6.listar_mitigaciones(active_only=active_only)
+    return jsonify({"ok": True, "mitigations": mitigations}), 200
+
+
 @app.route("/m6/security/host-state", methods=["GET"])
 def endpoint_host_state():
     if not _security_token_valido():
@@ -2564,6 +3070,201 @@ def endpoint_mitigation_status(incident_id):
     if result is None:
         return jsonify({"error": "mitigación no encontrada"}), 404
     return jsonify(result), 200
+
+
+@app.route("/m6/security/dashboard", methods=["GET"])
+def endpoint_security_dashboard():
+    html = r"""<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>M6 Mitigaciones</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, system-ui, Arial, sans-serif; }
+    body { margin: 0; background: #f5f7fb; color: #172033; }
+    header { background: #ffffff; border-bottom: 1px solid #dde3ee; padding: 16px 22px; display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+    h1 { font-size: 20px; margin: 0; letter-spacing: 0; }
+    main { padding: 18px 22px 28px; }
+    .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    input { height: 34px; border: 1px solid #b9c3d3; border-radius: 6px; padding: 0 10px; min-width: 230px; }
+    button { height: 34px; border: 1px solid #9aa8ba; border-radius: 6px; background: #ffffff; color: #172033; cursor: pointer; padding: 0 12px; }
+    button.primary { background: #2458d3; border-color: #2458d3; color: white; }
+    button.danger { border-color: #c94444; color: #b32626; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .summary { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 10px; margin: 14px 0; }
+    .metric { background: #ffffff; border: 1px solid #dde3ee; border-radius: 8px; padding: 12px; }
+    .metric strong { display: block; font-size: 22px; }
+    .metric span { color: #5b6678; font-size: 12px; }
+    .status { font-size: 13px; color: #5b6678; margin: 8px 0 14px; min-height: 18px; }
+    .table-wrap { background: #ffffff; border: 1px solid #dde3ee; border-radius: 8px; overflow: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 1100px; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid #edf1f6; text-align: left; font-size: 13px; vertical-align: top; }
+    th { background: #f9fbfe; color: #455168; font-weight: 700; position: sticky; top: 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    .badge { display: inline-block; border-radius: 999px; padding: 3px 8px; font-weight: 700; font-size: 12px; }
+    .active { background: #e6f7ed; color: #176b3a; }
+    .expired { background: #eef1f5; color: #5b6678; }
+    .empty { padding: 28px; text-align: center; color: #5b6678; }
+    @media (max-width: 760px) {
+      header { align-items: stretch; }
+      .controls { width: 100%; }
+      input { flex: 1; min-width: 170px; }
+      .summary { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+      main { padding: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>M6 Mitigaciones</h1>
+    <div class="controls">
+      <input id="token" type="password" placeholder="X-Security-Token">
+      <button id="refresh" class="primary">Actualizar</button>
+      <button id="toggle">Pausar</button>
+    </div>
+  </header>
+  <main>
+    <div class="summary">
+      <div class="metric"><strong id="total">0</strong><span>Total</span></div>
+      <div class="metric"><strong id="active">0</strong><span>Activas</span></div>
+      <div class="metric"><strong id="expired">0</strong><span>Expiradas/levantadas</span></div>
+      <div class="metric"><strong id="last">-</strong><span>Ultima lectura</span></div>
+    </div>
+    <div id="status" class="status">Ingresa el token y presiona Actualizar.</div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Estado</th><th>IP/MAC</th><th>SID</th><th>Castigo</th>
+            <th>Destino</th><th>Switch/Puerto</th><th>Tiempo</th>
+            <th>Flows</th><th>Incident</th><th>Accion</th>
+          </tr>
+        </thead>
+        <tbody id="rows"><tr><td colspan="10" class="empty">Sin datos cargados</td></tr></tbody>
+      </table>
+    </div>
+  </main>
+  <script>
+    const tokenInput = document.getElementById('token');
+    const rows = document.getElementById('rows');
+    const statusEl = document.getElementById('status');
+    const refreshBtn = document.getElementById('refresh');
+    const toggleBtn = document.getElementById('toggle');
+    let paused = false;
+    let loading = false;
+    tokenInput.value = sessionStorage.getItem('m6Token') || '';
+
+    function esc(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[ch]));
+    }
+    function shortId(value) {
+      value = String(value || '');
+      return value.length > 12 ? value.slice(0, 8) + '...' : value;
+    }
+    function setMetric(id, value) { document.getElementById(id).textContent = value; }
+    function headers() { return {'X-Security-Token': tokenInput.value.trim()}; }
+
+    async function load() {
+      if (loading || paused) return;
+      const token = tokenInput.value.trim();
+      if (!token) {
+        statusEl.textContent = 'Ingresa el token para consultar M6.';
+        return;
+      }
+      sessionStorage.setItem('m6Token', token);
+      loading = true;
+      refreshBtn.disabled = true;
+      try {
+        const resp = await fetch('/m6/security/mitigations?active=0', {headers: headers()});
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        render(data.mitigations || []);
+        statusEl.textContent = 'OK - mitigaciones actualizadas.';
+      } catch (err) {
+        statusEl.textContent = 'Error consultando M6: ' + err.message;
+      } finally {
+        loading = false;
+        refreshBtn.disabled = false;
+      }
+    }
+
+    function render(items) {
+      const active = items.filter(x => x.active).length;
+      setMetric('total', items.length);
+      setMetric('active', active);
+      setMetric('expired', items.length - active);
+      setMetric('last', new Date().toLocaleTimeString());
+      if (!items.length) {
+        rows.innerHTML = '<tr><td colspan="10" class="empty">No hay mitigaciones registradas</td></tr>';
+        return;
+      }
+      rows.innerHTML = items.map(item => {
+        const badge = item.active
+          ? '<span class="badge active">ACTIVE</span>'
+          : '<span class="badge expired">' + esc(item.state || 'EXPIRED') + '</span>';
+        const dst = [item.dst_ip || '', item.dst_port ? ':' + item.dst_port : ''].join('');
+        const flows = (item.flow_ids || []).map(shortId).join('<br>') || '-';
+        const disabled = item.active ? '' : 'disabled';
+        return `<tr>
+          <td>${badge}</td>
+          <td><code>${esc(item.src_ip || item.ip_atacante || '-')}</code><br><code>${esc(item.src_mac || item.mac_atacante || '-')}</code></td>
+          <td><code>${esc(item.sid || '-')}</code></td>
+          <td>${esc(item.mitigation_action || item.accion || item.action || '-')}</td>
+          <td><code>${esc(dst || '-')}</code></td>
+          <td><code>${esc(item.switch_dpid || (item.devices || [])[0] || '-')}</code><br>port ${esc(item.in_port ?? '-')}</td>
+          <td>${esc(item.remaining_human || '-')}<br><code>${esc(item.expires_at || '-')}</code></td>
+          <td><code>${flows}</code></td>
+          <td><code title="${esc(item.incident_id)}">${esc(shortId(item.incident_id))}</code></td>
+          <td><button class="danger" ${disabled} onclick="unmitigate('${esc(item.incident_id)}')">Levantar</button></td>
+        </tr>`;
+      }).join('');
+    }
+
+    async function unmitigate(incidentId) {
+      if (!incidentId || !confirm('Levantar mitigacion ' + incidentId + '?')) return;
+      try {
+        const resp = await fetch('/m6/security/unmitigate', {
+          method: 'POST',
+          headers: {...headers(), 'Content-Type': 'application/json'},
+          body: JSON.stringify({incident_id: incidentId})
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        await load();
+      } catch (err) {
+        statusEl.textContent = 'Error levantando mitigacion: ' + err.message;
+      }
+    }
+    window.unmitigate = unmitigate;
+    refreshBtn.addEventListener('click', load);
+    toggleBtn.addEventListener('click', () => {
+      paused = !paused;
+      toggleBtn.textContent = paused ? 'Reanudar' : 'Pausar';
+      if (!paused) load();
+    });
+    setInterval(load, 2000);
+  </script>
+</body>
+</html>"""
+    return Response(html, mimetype="text/html")
+
+
+@app.route("/m6/monitoring/ensure-gre", methods=["POST"])
+def endpoint_monitoring_ensure_gre():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    result = m6.asegurar_monitoring_gre()
+    return jsonify(result), 200 if result.get("ok") else 500
+
+
+@app.route("/m6/monitoring/gre-status", methods=["GET"])
+def endpoint_monitoring_gre_status():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    result = m6.estado_monitoring_gre()
+    return jsonify(result), 200 if result.get("ok") else 500
 
 
 @app.route("/m6/arranque", methods=["POST"])
@@ -2629,6 +3330,9 @@ if __name__ == "__main__":
     print(SEP)
 
     print("[M6] Arranque legacy deshabilitado: no se instalarán flows en ONOS")
+    if Config.MONITORING_GRE_INSTALL_ON_STARTUP:
+        print("[M6] Asegurando flows GRE de monitoreo al arranque")
+        print(f"[M6] monitoring_gre={m6.asegurar_monitoring_gre()}")
 
     m6.iniciar_sincronizador_portal()
 
