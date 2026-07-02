@@ -6,7 +6,6 @@ server:
 common:
   path_prefix: /loki
   replication_factor: 1
-
   ring:
     kvstore:
       store: inmemory
@@ -33,9 +32,14 @@ compactor:
   working_directory: /loki/compactor
   retention_enabled: true
   compaction_interval: 10m
+  delete_request_store: filesystem
 
 distributor:
   otlp_config:
-    default_resource_attributes:
-      service.name: loki
-    # Modificar para mapear campos de LogRecords a etiquetas de Loki
+    default_resource_attributes_as_index_labels:
+      - service.name
+      - event.domain
+      - event.name
+      - event.severity
+      - session.id
+      - host.ip

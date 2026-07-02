@@ -791,7 +791,7 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
     with obs.span("auth.authenticate"):
         obs.event(
             Events.AUTH_LOGIN_STARTED,
-            attributes={"user.ip": ip_asignada, "user.code": codigo_pucp},
+            attributes={"user.credential": codigo_pucp},
         )
 
         # ── M5: medir latencia RADIUS ─────────────────────────────
@@ -849,8 +849,7 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
                 Events.AUTH_LOGIN_FAILED,
                 attributes={
                     "auth.duration.ms": duracion_ms,
-                    "auth.role": nombre_rol,
-                    "auth.code": codigo_pucp,
+                    "user.credential": codigo_pucp,
                     "auth.cause": "USUARIO_NO_EXISTE",
                 },
             )
@@ -871,8 +870,7 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
                     Events.AUTH_LOGIN_FAILED,
                     attributes={
                         "auth.duration.ms": duracion_ms,
-                        "auth.role": nombre_rol,
-                        "auth.code": codigo_pucp,
+                        "network.ip": ip_asignada,
                         "auth.cause": "HOST_NO_RESUELTO",
                     },
                 )
@@ -891,8 +889,8 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
                 Events.AUTH_LOGIN_FAILED,
                 attributes={
                     "auth.duration.ms": duracion_ms,
-                    "auth.role": nombre_rol,
-                    "auth.code": codigo_pucp,
+                    "network.ip": ip_asignada,
+                    "network.mac": mac,
                     "auth.cause": "ANTISPOOFING",
                 },
             )
@@ -906,8 +904,11 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
                 Events.AUTH_LOGIN_FAILED,
                 attributes={
                     "auth.duration.ms": duracion_ms,
-                    "auth.role": nombre_rol,
-                    "auth.code": codigo_pucp,
+                    "network.ip": ip_asignada,
+                    "network.mac": mac,
+                    "network.vlan_id": vlan_id,
+                    "network.switch_dpid": switch_dpid,
+                    "network.in_port": in_port,
                     "auth.cause": "ERROR_REGISTRO_SESION",
                 },
             )
@@ -923,8 +924,11 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
             Events.AUTH_SESSION_STARTED,
             attributes={
                 "auth.duration.ms": duracion_ms,
-                "auth.role": nombre_rol,
-                "auth.code": codigo_pucp,
+                "network.ip": ip_asignada,
+                "network.mac": mac,
+                "network.vlan_id": vlan_id,
+                "network.switch_dpid": switch_dpid,
+                "network.in_port": in_port,
             },
         )
 
@@ -941,8 +945,6 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
             Events.AUTH_LOGIN_SUCCESS,
             attributes={
                 "auth.duration.ms": duracion_ms,
-                "auth.role": nombre_rol,
-                "auth.code": codigo_pucp,
             },
         )        
 
@@ -975,7 +977,7 @@ def autenticar_visitante(correo: str, password: str, ip_asignada: str) -> dict:
     with obs.span("auth.authenticate"):
         obs.event(
             Events.AUTH_LOGIN_STARTED,
-            attributes={"user.ip": ip_asignada, "user.code": correo},
+            attributes={"user.correo": correo, "user.visitante": True},
         )
 
         ok = _users.registrar_visitante(correo, password)
@@ -984,7 +986,8 @@ def autenticar_visitante(correo: str, password: str, ip_asignada: str) -> dict:
                 Events.AUTH_REGISTER_FAILED,
                 attributes={
                     "auth.cause": "ERROR_REGISTRO_VISITANTE",
-                    "auth.correo": correo,
+                    "user.correo": correo,
+                    "user.visitante": True,
                 },
             )
             return {"ok": False, "motivo": "No se pudo registrar el visitante.",   "codigo_error": "ERROR_REGISTRO_VISITANTE"}
@@ -996,7 +999,9 @@ def autenticar_visitante(correo: str, password: str, ip_asignada: str) -> dict:
                 Events.AUTH_LOGIN_FAILED,
                 attributes={
                     "auth.cause": "CREDENCIALES_INVALIDAS",
-                    "auth.correo": correo,
+                    "user.correo": correo,
+                    "user.visitante": True,
+                    "radius.response": "Access-Reject",
                 },
             )
             return {"ok": False, "motivo": "FreeRADIUS rechazó las credenciales.", "codigo_error": "CREDENCIALES_INVALIDAS"}
@@ -1017,7 +1022,8 @@ def autenticar_visitante(correo: str, password: str, ip_asignada: str) -> dict:
                     Events.AUTH_LOGIN_FAILED,
                     attributes={
                         "auth.role": nombre_rol,
-                        "auth.correo": correo,
+                        "user.correo": correo,
+                        "user.visitante": True,
                         "auth.cause": "HOST_NO_RESUELTO",
                     },
                 )
@@ -1036,8 +1042,8 @@ def autenticar_visitante(correo: str, password: str, ip_asignada: str) -> dict:
             obs.event(
                 Events.AUTH_LOGIN_FAILED,
                 attributes={
-                    "auth.role": nombre_rol,
-                    "auth.correo": correo,
+                    "user.correo": correo,
+                    "user.visitante": True,
                     "auth.cause": "ANTISPOOFING",
                 },
             )
@@ -1053,8 +1059,13 @@ def autenticar_visitante(correo: str, password: str, ip_asignada: str) -> dict:
             obs.event(
                 Events.AUTH_LOGIN_FAILED,
                 attributes={
-                    "auth.role": nombre_rol,
-                    "auth.correo": correo,
+                    "user.correo": correo,
+                    "user.visitante": True,
+                    "network.ip": ip_asignada,
+                    "network.mac": mac,
+                    "network.vlan_id": vlan_id,
+                    "network.switch_dpid": switch_dpid,
+                    "network.in_port": in_port,
                     "auth.cause": "ERROR_REGISTRO_SESION",
                 },
             )
@@ -1068,8 +1079,13 @@ def autenticar_visitante(correo: str, password: str, ip_asignada: str) -> dict:
         obs.event(
                 Events.AUTH_SESSION_STARTED,
                 attributes={
-                    "auth.role": nombre_rol,
-                    "auth.correo": correo,
+                    "user.correo": correo,
+                    "user.visitante": True,
+                    "network.ip": ip_asignada,
+                    "network.mac": mac,
+                    "network.vlan_id": vlan_id,
+                    "network.switch_dpid": switch_dpid,
+                    "network.in_port": in_port,
                 },
             )
 
@@ -1085,8 +1101,8 @@ def autenticar_visitante(correo: str, password: str, ip_asignada: str) -> dict:
             obs.event(
                 Events.AUTH_LOGIN_SUCCESS,
                 attributes={
-                    "auth.role": nombre_rol,
-                    "auth.correo": correo,
+                    "user.correo": correo,
+                    "user.visitante": True,
                 },
             )  
 
@@ -1114,7 +1130,7 @@ def cerrar_sesion(mac: str, id_usuario: int, codigo_pucp: str = None, ip_asignad
     with obs.span("auth.authenticate"):
         obs.event(
             Events.AUTH_LOGOUT,
-            attributes={"user.ip": ip_asignada, "user.code": codigo_pucp},
+            attributes={"user.visitante": es_visitante, "network.host.mac": mac, "network.host.ip": ip_asignada},
         )
 
         sesion = _sessions.close_session(mac, id_usuario)
@@ -1132,7 +1148,8 @@ def cerrar_sesion(mac: str, id_usuario: int, codigo_pucp: str = None, ip_asignad
             Events.AUTH_SESSION_ENDED,
             attributes={
                 "auth.role": sesion.get("nombre_rol"),
-                "auth.code": codigo_pucp,
+                "user.visitante": es_visitante,
+                "auth.login_timestamp": sesion.get("login_timestamp") if sesion.get("login_timestamp") else None,
             },
         )
 

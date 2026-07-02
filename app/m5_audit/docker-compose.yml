@@ -3,8 +3,8 @@ name: m5-observability
 services:
 
   grafana:
-    image: grafana/grafana-oss:12.2.0
-    container_name: grafana
+    image: grafana/grafana:13.0.1
+    container_name: m5-grafana
     # restart: unless-stopped
     ports:
       - "3000:3000"
@@ -33,7 +33,7 @@ services:
 
   loki:
     image: grafana/loki:3.5.5
-    container_name: loki
+    container_name: m5-loki
     # restart: unless-stopped
     command:
       - "-config.file=/etc/loki/config.yaml"
@@ -54,7 +54,7 @@ services:
 
   tempo:
     image: grafana/tempo:2.9.2
-    container_name: tempo
+    container_name: m5-tempo
     # restart: unless-stopped
     command:
       - "-config.file=/etc/tempo/tempo.yaml"
@@ -65,7 +65,7 @@ services:
       - tempo-data:/var/tempo
 
     healthcheck:
-      test: ["CMD-SHELL", "wget --spider -q http://localhost:3200/ready || exit 1"]
+      test: ["CMD", "wget --spider -q http://localhost:3200/ready"]
       interval: 20s
       timeout: 5s
       retries: 5
@@ -74,8 +74,8 @@ services:
       - observability
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.139.0
-    container_name: otel-collector
+    image: otel/opentelemetry-collector-contrib:0.144.0
+    container_name: m5-otel-collector
     # restart: unless-stopped
     command:
       - "--config=/etc/otelcol/config.yaml"
@@ -91,11 +91,10 @@ services:
         condition: service_healthy
 
     healthcheck:
-    test:
-      ["CMD", "wget", "--spider", "-q", "http://localhost:13133"]
-    interval: 25s
-    timeout: 10s
-    retries: 3
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133"]
+      interval: 25s
+      timeout: 10s
+      retries: 3
 
     networks:
       - observability

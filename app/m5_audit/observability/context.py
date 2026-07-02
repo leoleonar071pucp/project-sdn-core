@@ -38,8 +38,8 @@ class Context:
             "session_id": "session.id",
             "user_id": "user.id",
             "user_code": "user.code",
-            "role": "role.name",
-            "role2": "role2.name",
+            "user_role": "role.name",
+            "user_role2": "role2.name",
         }
 
         for key, value in values.items():

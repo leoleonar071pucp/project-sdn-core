@@ -16,7 +16,7 @@ _RESERVED_ATTRIBUTES = frozenset({
     "host.ip",
     "session.id",
     "user.id",
-    # "user.code",
+    "user.code",
     "role.name",
     "role2.name",
 })
@@ -51,8 +51,9 @@ class Observability:
         host_ip: str | None = None,
         session_id: str | None = None,
         user_id: str | None = None,
-        role: str | None = None,
-        role2: str | None = None,
+        user_code: str | None = None,
+        user_role: str | None = None,
+        user_role2: str | None = None,
     ) -> None:
         """
         Add or update distributed context values.
@@ -63,8 +64,9 @@ class Observability:
             host_ip=host_ip,
             session_id=session_id,
             user_id=user_id,
-            role=role,
-            role2=role2,
+            user_code=user_code,
+            user_role=user_role,
+            user_role2=user_role2,
         )
 
     def get_context(self) -> dict[str, Any]:
