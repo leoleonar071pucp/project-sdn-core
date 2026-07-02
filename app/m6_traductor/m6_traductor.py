@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 m6_traductor.py — Módulo Traductor SDN PUCP | Grupo 2 TEL354
 Mark V (base) + ajustes de integración M1 (Sheila J)
