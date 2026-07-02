@@ -1,0 +1,147 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 22,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "title": "M1 Authentication Events",
+      "type": "logs",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "{service_name=\"m1_auth\",event_name=~\"$event\",role_name=~\"$role\",user_id=~\"$user\"}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      }
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 40,
+  "tags": [
+    "sdn",
+    "audit",
+    "m1",
+    "loki"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "event",
+        "label": "Evento",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
+        "definition": "label_values({service_name=\"m1_auth\"}, event_name)",
+        "query": {
+          "label_values": "label_values({service_name=\"m1_auth\"}, event_name)"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".+",
+        "multi": false,
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": ".+"
+        }
+      },
+      {
+        "name": "role",
+        "label": "Rol",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
+        "definition": "label_values({service_name=\"m1_auth\"}, role_name)",
+        "query": {
+          "label_values": "label_values({service_name=\"m1_auth\"}, role_name)"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".+",
+        "multi": false,
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": ".+"
+        }
+      },
+      {
+        "name": "user",
+        "label": "Usuario",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
+        "definition": "label_values({service_name=\"m1_auth\"}, user_id)",
+        "query": {
+          "label_values": "label_values({service_name=\"m1_auth\"}, user_id)"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".+",
+        "multi": false,
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": ".+"
+        }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "SDN Audit",
+  "uid": "sdn-audit",
+  "version": 1
+}
