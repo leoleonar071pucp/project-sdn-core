@@ -13,6 +13,7 @@ services:
   sync:
     build: ./sync
     container_name: m2-sync
+    network_mode: host
     restart: unless-stopped
     environment:
       DB_HOST: localhost
