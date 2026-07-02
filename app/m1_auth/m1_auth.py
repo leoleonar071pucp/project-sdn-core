@@ -16,6 +16,7 @@ import datetime
 import tempfile
 import urllib.request as _ul
 import json as _js
+import uuid
 try:
     import pyrad.client
     import pyrad.dictionary
@@ -33,36 +34,13 @@ except ImportError:
     print("[ADVERTENCIA] mysql-connector-python no instalado.")
 
 # ── Cliente M5 (auditoría) 
-import threading
+from observability import (Observability,TelemetryConfig, Events)
 
-M5_URL = "http://127.0.0.1:5002/m5/log"
-
-def _emitir_evento_m5(evento, usuario=None, rol=None, ip=None, mac=None,
-                       duracion_ms=None, detalle=None):
-    """
-    Envía un evento de auditoría a M5 de forma asíncrona.
-    Si M5 no está disponible, M1 continúa sin fallar.
-    """
-    def _enviar():
-        try:
-            import urllib.request as _ul
-            body = {
-                "evento":      evento,
-                "usuario":     usuario,
-                "rol":         rol,
-                "ip":          ip,
-                "mac":         mac,
-                "duracion_ms": duracion_ms,
-                "detalle":     detalle,
-            }
-            _body = _js.dumps(body).encode("utf-8")
-            _req = _ul.Request(M5_URL, data=_body,
-                              headers={"Content-Type": "application/json"})
-            _ul.urlopen(_req, timeout=3)
-        except Exception:
-            pass  # M5 no disponible — no interrumpe el flujo
-
-    threading.Thread(target=_enviar, daemon=True).start()
+obsConfig = TelemetryConfig(
+    service_name="m1-auth",
+    service_version="1.0.0",
+)
+obs = Observability(obsConfig)
 
 # Configuración base 
 class Config:
@@ -808,90 +786,177 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
     if _users.is_blocked(codigo_pucp):
         return {"ok": False, "motivo": "Cuenta bloqueada. Contacta al Administrador TI.", "codigo_error": "CUENTA_BLOQUEADA"}
 
-    # ── M5: medir latencia RADIUS ─────────────────────────────
-    t0 = time.time()
-    nombre_rol, session_timeout = _radius.authenticate(codigo_pucp, password, ip_asignada)
-    duracion_ms = int((time.time() - t0) * 1000)
-    # ─────────────────────────────────────────────────────────
+    context_id = str(uuid.uuid4())
+    obs.update_context(context_id=context_id, host_ip=ip_asignada, user_code=codigo_pucp)
+    with obs.span("auth.authenticate"):
+        obs.event(
+            Events.AUTH_LOGIN_STARTED,
+            attributes={"user.ip": ip_asignada, "user.code": codigo_pucp},
+        )
 
-    if nombre_rol is None:
-        total = _users.increment_failed_attempt(codigo_pucp)
-        restantes = Config.MAX_INTENTOS - total
-        if total >= Config.MAX_INTENTOS:
-            # ── M5: cuenta bloqueada ──────────────────────────
-            _emitir_evento_m5("cuenta_bloqueada", usuario=codigo_pucp,ip=ip_asignada, duracion_ms=duracion_ms, detalle={"intentos_totales": 3})
-            # ─────────────────────────────────────────────────
+        # ── M5: medir latencia RADIUS ─────────────────────────────
+        t0 = time.time()
+        nombre_rol, session_timeout = _radius.authenticate(codigo_pucp, password, ip_asignada)
+        duracion_ms = int((time.time() - t0) * 1000)
+        # ─────────────────────────────────────────────────────────
+
+        if nombre_rol is None:
+            total = _users.increment_failed_attempt(codigo_pucp)
+            restantes = Config.MAX_INTENTOS - total
+            if total >= Config.MAX_INTENTOS:
+                # ── M5: cuenta bloqueada ──────────────────────────
+                obs.event(
+                    Events.AUTH_ACCOUNT_LOCKED,
+                    attributes={
+                        "auth.duration.ms": duracion_ms,
+                        "auth.failed_attempts": total,
+                        "auth.cause": "BLOQUEADO_POR_INTENTOS",
+                    },
+                )
+                # ─────────────────────────────────────────────────
+                return {"ok": False,
+                        "motivo": "Credenciales inválidas. Cuenta bloqueada por 3 intentos fallidos. Contacta al Administrador TI.", "codigo_error": "BLOQUEADO_POR_INTENTOS"}
+            # ── M5: login fallido ─────────────────────────────────
+            #_emitir_evento_m5("login_fallido", usuario=codigo_pucp,ip=ip_asignada, duracion_ms=duracion_ms, detalle={"intentos_restantes": restantes})
+            obs.event(
+                Events.AUTH_LOGIN_FAILED,
+                attributes={
+                    "auth.duration.ms": duracion_ms,
+                    "auth.remaining_attempts": restantes,
+                    "auth.cause": "CREDENCIALES_INVALIDAS",
+                },
+            )
+            # ─────────────────────────────────────────────────────
             return {"ok": False,
-                    "motivo": "Credenciales inválidas. Cuenta bloqueada por 3 intentos fallidos. Contacta al Administrador TI.", "codigo_error": "BLOQUEADO_POR_INTENTOS"}
-        # ── M5: login fallido ─────────────────────────────────
-        _emitir_evento_m5("login_fallido", usuario=codigo_pucp,ip=ip_asignada, duracion_ms=duracion_ms, detalle={"intentos_restantes": restantes})
-        # ─────────────────────────────────────────────────────
-        return {"ok": False,
-                "motivo": f"Credenciales inválidas. ({restantes} intento(s) restante(s))",
-                "codigo_error": "CREDENCIALES_INVALIDAS", "intentos_restantes": restantes}
+                    "motivo": f"Credenciales inválidas. ({restantes} intento(s) restante(s))",
+                    "codigo_error": "CREDENCIALES_INVALIDAS", "intentos_restantes": restantes}
 
-    vlan_id = _roles.get_vlan_id(nombre_rol)
-    if vlan_id is None:
-        return {"ok": False, "motivo": f"Rol '{nombre_rol}' no reconocido.", "codigo_error": "ROL_NO_RECONOCIDO"}
+        vlan_id = _roles.get_vlan_id(nombre_rol)
+        if vlan_id is None:
+            obs.event(
+                Events.AUTH_LOGIN_FAILED,
+                attributes={
+                    "auth.duration.ms": duracion_ms,
+                    "auth.role": nombre_rol,
+                    "auth.cause": "ROL_NO_RECONOCIDO",
+                },
+            )
+            return {"ok": False, "motivo": f"Rol '{nombre_rol}' no reconocido.", "codigo_error": "ROL_NO_RECONOCIDO"}
 
-    id_usuario = _users.get_id(codigo_pucp)
-    if not id_usuario:
-        return {"ok": False, "motivo": "Usuario no encontrado en base de datos.", "codigo_error": "USUARIO_NO_EXISTE"}
+        id_usuario = _users.get_id(codigo_pucp)
+        if not id_usuario:
+            obs.event(
+                Events.AUTH_LOGIN_FAILED,
+                attributes={
+                    "auth.duration.ms": duracion_ms,
+                    "auth.role": nombre_rol,
+                    "auth.code": codigo_pucp,
+                    "auth.cause": "USUARIO_NO_EXISTE",
+                },
+            )
+            return {"ok": False, "motivo": "Usuario no encontrado en base de datos.", "codigo_error": "USUARIO_NO_EXISTE"}
 
-    # ── Resolución de host (MAC, switch, puerto) ─────────────────────────────
-    # En modo de prueba (M6_HABILITADO=False) se omite la llamada real a M6
-    # y se usan valores dummy, para poder seguir probando RADIUS + MySQL
-    # sin depender de que M6/ONOS estén corriendo.
-    if Config.M6_HABILITADO:
-        # --- INICIO bloque M6 real ---
-        host = _tokens.resolver_host(ip_asignada)
-        if not host:
-            return {"ok": False, "motivo": "No se pudo resolver el host en ONOS.",  "codigo_error": "HOST_NO_RESUELTO"}
-        mac, switch_dpid, in_port = host["mac"], host["switch_dpid"], host["in_port"]
-        # --- FIN bloque M6 real ---
-    else:
-        print("  [MODO PRUEBA] M6 deshabilitado — usando mac/switch/puerto dummy")
-        mac         = Config.MAC_DUMMY
-        switch_dpid = Config.SWITCH_DPID_DUMMY
-        in_port     = Config.IN_PORT_DUMMY
+        obs.update_context(user_id=id_usuario, user_role=nombre_rol)
 
-    libre, motivo = _sessions.verify_antispoofing(ip_asignada, mac)
-    if not libre:
-        return {"ok": False, "motivo": f"Anti-spoofing: {motivo}",  "codigo_error": "ANTISPOOFING"}
+        sesion_existente = _sessions.get_session_by_usuario(id_usuario) 
+        # ── Resolución de host (MAC, switch, puerto) ─────────────────────────────
+        # En modo de prueba (M6_HABILITADO=False) se omite la llamada real a M6
+        # y se usan valores dummy, para poder seguir probando RADIUS + MySQL
+        # sin depender de que M6/ONOS estén corriendo.
+        if Config.M6_HABILITADO:
+            # --- INICIO bloque M6 real ---
+            host = _tokens.resolver_host(ip_asignada)
+            if not host:
+                obs.event(
+                    Events.AUTH_LOGIN_FAILED,
+                    attributes={
+                        "auth.duration.ms": duracion_ms,
+                        "auth.role": nombre_rol,
+                        "auth.code": codigo_pucp,
+                        "auth.cause": "HOST_NO_RESUELTO",
+                    },
+                )
+                return {"ok": False, "motivo": "No se pudo resolver el host en ONOS.",  "codigo_error": "HOST_NO_RESUELTO"}
+            mac, switch_dpid, in_port = host["mac"], host["switch_dpid"], host["in_port"]
+            # --- FIN bloque M6 real ---
+        else:
+            print("  [MODO PRUEBA] M6 deshabilitado — usando mac/switch/puerto dummy")
+            mac         = Config.MAC_DUMMY
+            switch_dpid = Config.SWITCH_DPID_DUMMY
+            in_port     = Config.IN_PORT_DUMMY
 
-    id_sesion = _sessions.register_session(
-        id_usuario, mac, ip_asignada, vlan_id, nombre_rol, switch_dpid, in_port
-    )
-    if id_sesion is None:
-        return {"ok": False, "motivo": "Error al registrar sesión en base de datos.", "codigo_error": "ERROR_REGISTRO_SESION"}
+        libre, motivo = _sessions.verify_antispoofing(ip_asignada, mac)
+        if not libre:
+            obs.event(
+                Events.AUTH_LOGIN_FAILED,
+                attributes={
+                    "auth.duration.ms": duracion_ms,
+                    "auth.role": nombre_rol,
+                    "auth.code": codigo_pucp,
+                    "auth.cause": "ANTISPOOFING",
+                },
+            )
+            return {"ok": False, "motivo": f"Anti-spoofing: {motivo}",  "codigo_error": "ANTISPOOFING"}
 
-    _sessions.create_binding(ip_asignada, mac, id_usuario, switch_dpid, in_port, id_sesion)
-    _users.reset_failed_attempts(codigo_pucp)
-    _radius.accounting_start(codigo_pucp, ip_asignada, mac)
+        id_sesion = _sessions.register_session(
+            id_usuario, mac, ip_asignada, vlan_id, nombre_rol, switch_dpid, in_port
+        )
+        if id_sesion is None:
+            obs.event(
+                Events.AUTH_LOGIN_FAILED,
+                attributes={
+                    "auth.duration.ms": duracion_ms,
+                    "auth.role": nombre_rol,
+                    "auth.code": codigo_pucp,
+                    "auth.cause": "ERROR_REGISTRO_SESION",
+                },
+            )
+            return {"ok": False, "motivo": "Error al registrar sesión en base de datos.", "codigo_error": "ERROR_REGISTRO_SESION"}
 
-    # Segunda llamada a M6 — ya con sesión confirmada en DB, instala flows.
-    if Config.M6_HABILITADO:
-        # --- INICIO bloque M6 real ---
-        _tokens.emitir_token(codigo_pucp, nombre_rol, vlan_id, ip_asignada, mac, switch_dpid, in_port)
-        # --- FIN bloque M6 real ---
-    else:
-        print("  [MODO PRUEBA] M6 deshabilitado — no se emite token (no se instalan flows en ONOS)")
+        obs.update_context(session_id=id_sesion)
 
-    # ── M5: login exitoso ─────────────────────────────────────
-    _emitir_evento_m5("login_exitoso", usuario=codigo_pucp, rol=nombre_rol,  ip=ip_asignada, mac=mac, duracion_ms=duracion_ms, detalle={"vlan_id": vlan_id, "session_timeout": session_timeout,  "id_sesion": id_sesion})
-    # ─────────────────────────────────────────────────────────
+        _sessions.create_binding(ip_asignada, mac, id_usuario, switch_dpid, in_port, id_sesion)
+        _users.reset_failed_attempts(codigo_pucp)
+        _radius.accounting_start(codigo_pucp, ip_asignada, mac)
 
-    return {
-        "ok": True,
-        "codigo_pucp": codigo_pucp,
-        "nombre_rol": nombre_rol,
-        "vlan_id": vlan_id,
-        "ip_asignada": ip_asignada,
-        "mac": mac,
-        "id_usuario": id_usuario,
-        "id_sesion": id_sesion,
-        "session_timeout": session_timeout,
-    }
+        obs.event(
+            Events.AUTH_SESSION_STARTED,
+            attributes={
+                "auth.duration.ms": duracion_ms,
+                "auth.role": nombre_rol,
+                "auth.code": codigo_pucp,
+            },
+        )
+
+        # Segunda llamada a M6 — ya con sesión confirmada en DB, instala flows.
+        if Config.M6_HABILITADO:
+            # --- INICIO bloque M6 real ---
+            _tokens.emitir_token(codigo_pucp, nombre_rol, vlan_id, ip_asignada, mac, switch_dpid, in_port)
+            # --- FIN bloque M6 real ---
+        else:
+            print("  [MODO PRUEBA] M6 deshabilitado — no se emite token (no se instalan flows en ONOS)")
+
+        # ── M5: login exitoso ─────────────────────────────────────
+        obs.event(
+            Events.AUTH_LOGIN_SUCCESS,
+            attributes={
+                "auth.duration.ms": duracion_ms,
+                "auth.role": nombre_rol,
+                "auth.code": codigo_pucp,
+            },
+        )        
+
+        return {
+            "ok": True,
+            "codigo_pucp": codigo_pucp,
+            "nombre_rol": nombre_rol,
+            "vlan_id": vlan_id,
+            "ip_asignada": ip_asignada,
+            "mac": mac,
+            "id_usuario": id_usuario,
+            "id_sesion": id_sesion,
+            "session_timeout": session_timeout,
+        }
 
 
 def autenticar_visitante(correo: str, password: str, ip_asignada: str) -> dict:
@@ -905,74 +970,137 @@ def autenticar_visitante(correo: str, password: str, ip_asignada: str) -> dict:
     if not correo or not password:
         return {"ok": False, "motivo": "Ingresa correo y contraseña.", "codigo_error": "CREDENCIALES_VACIAS"}
 
-    ok = _users.registrar_visitante(correo, password)
-    if not ok:
-        return {"ok": False, "motivo": "No se pudo registrar el visitante.",   "codigo_error": "ERROR_REGISTRO_VISITANTE"}
+    context_id = str(uuid.uuid4())
+    obs.update_context(context_id=context_id, host_ip=ip_asignada, user_code=correo)
+    with obs.span("auth.authenticate"):
+        obs.event(
+            Events.AUTH_LOGIN_STARTED,
+            attributes={"user.ip": ip_asignada, "user.code": correo},
+        )
 
-    nombre_rol, _ = _radius.authenticate(correo, password, ip_asignada)
-    if nombre_rol is None:
-        _users.eliminar_visitante(correo)
-        return {"ok": False, "motivo": "FreeRADIUS rechazó las credenciales.", "codigo_error": "CREDENCIALES_INVALIDAS"}
+        ok = _users.registrar_visitante(correo, password)
+        if not ok:
+            obs.event(
+                Events.AUTH_REGISTER_FAILED,
+                attributes={
+                    "auth.cause": "ERROR_REGISTRO_VISITANTE",
+                    "auth.correo": correo,
+                },
+            )
+            return {"ok": False, "motivo": "No se pudo registrar el visitante.",   "codigo_error": "ERROR_REGISTRO_VISITANTE"}
 
-    vlan_id = _roles.get_vlan_id(nombre_rol)
-    if vlan_id is None:
-        _users.eliminar_visitante(correo)
-        return {"ok": False, "motivo": f"Rol '{nombre_rol}' no reconocido.",  "codigo_error": "ROL_NO_RECONOCIDO"}
-
-    # Resolución de host — mismo criterio que autenticar() (ver arriba)
-    if Config.M6_HABILITADO:
-        # --- INICIO bloque M6 real ---
-        host = _tokens.resolver_host(ip_asignada)
-        if not host:
+        nombre_rol, _ = _radius.authenticate(correo, password, ip_asignada)
+        if nombre_rol is None:
             _users.eliminar_visitante(correo)
-            return {"ok": False, "motivo": "No se pudo resolver el host en ONOS.",   "codigo_error": "HOST_NO_RESUELTO"}
-        mac, switch_dpid, in_port = host["mac"], host["switch_dpid"], host["in_port"]
-        # --- FIN bloque M6 real ---
-    else:
-        print("  [MODO PRUEBA] M6 deshabilitado — usando mac/switch/puerto dummy")
-        mac         = Config.MAC_DUMMY
-        switch_dpid = Config.SWITCH_DPID_DUMMY
-        in_port     = Config.IN_PORT_DUMMY
+            obs.event(
+                Events.AUTH_LOGIN_FAILED,
+                attributes={
+                    "auth.cause": "CREDENCIALES_INVALIDAS",
+                    "auth.correo": correo,
+                },
+            )
+            return {"ok": False, "motivo": "FreeRADIUS rechazó las credenciales.", "codigo_error": "CREDENCIALES_INVALIDAS"}
 
-    libre, motivo = _sessions.verify_antispoofing(ip_asignada, mac)
-    if not libre:
-        _users.eliminar_visitante(correo)
-        return {"ok": False, "motivo": f"Anti-spoofing: {motivo}", "codigo_error": "ANTISPOOFING"}
+        vlan_id = _roles.get_vlan_id(nombre_rol)
+        if vlan_id is None:
+            _users.eliminar_visitante(correo)
+            return {"ok": False, "motivo": f"Rol '{nombre_rol}' no reconocido.",  "codigo_error": "ROL_NO_RECONOCIDO"}
 
-    # id_usuario=0 reservado para visitantes (no tienen fila en `usuarios`)
-    id_sesion = _sessions.register_session(
-        0, mac, ip_asignada, vlan_id, nombre_rol, switch_dpid, in_port
-    )
-    if id_sesion is None:
-        _users.eliminar_visitante(correo)
-        return {"ok": False, "motivo": "No se pudo registrar la sesión.",  "codigo_error": "ERROR_REGISTRO_SESION"}
+        obs.update_context(user_role=nombre_rol)
 
-    _sessions.create_binding(ip_asignada, mac, 0, switch_dpid, in_port, id_sesion)
-    _radius.accounting_start(correo, ip_asignada, mac)
+        # Resolución de host — mismo criterio que autenticar() (ver arriba)
+        if Config.M6_HABILITADO:
+            # --- INICIO bloque M6 real ---
+            host = _tokens.resolver_host(ip_asignada)
+            if not host:
+                obs.event(
+                    Events.AUTH_LOGIN_FAILED,
+                    attributes={
+                        "auth.role": nombre_rol,
+                        "auth.correo": correo,
+                        "auth.cause": "HOST_NO_RESUELTO",
+                    },
+                )
+                _users.eliminar_visitante(correo)
+                return {"ok": False, "motivo": "No se pudo resolver el host en ONOS.",   "codigo_error": "HOST_NO_RESUELTO"}
+            mac, switch_dpid, in_port = host["mac"], host["switch_dpid"], host["in_port"]
+            # --- FIN bloque M6 real ---
+        else:
+            print("  [MODO PRUEBA] M6 deshabilitado — usando mac/switch/puerto dummy")
+            mac         = Config.MAC_DUMMY
+            switch_dpid = Config.SWITCH_DPID_DUMMY
+            in_port     = Config.IN_PORT_DUMMY
 
-    # Emisión de token a M6 — desactivada en modo prueba (ver autenticar())
-    if Config.M6_HABILITADO:
-        # --- INICIO bloque M6 real ---
-        _tokens.emitir_token(correo, nombre_rol, vlan_id, ip_asignada, mac, switch_dpid, in_port)
-        # --- FIN bloque M6 real ---
-    else:
-        print("  [MODO PRUEBA] M6 deshabilitado — no se emite token")
+        libre, motivo = _sessions.verify_antispoofing(ip_asignada, mac)
+        if not libre:
+            obs.event(
+                Events.AUTH_LOGIN_FAILED,
+                attributes={
+                    "auth.role": nombre_rol,
+                    "auth.correo": correo,
+                    "auth.cause": "ANTISPOOFING",
+                },
+            )
+            _users.eliminar_visitante(correo)
+            return {"ok": False, "motivo": f"Anti-spoofing: {motivo}", "codigo_error": "ANTISPOOFING"}
 
-    # ── M5: visitante registrado ──────────────────────────────
-    _emitir_evento_m5("visitante_acceso", usuario=correo, rol="Visitante",ip=ip_asignada, mac=mac,detalle={"id_sesion": id_sesion, "session_timeout": Config.VISITANTE_TIMEOUT_SEG})
-    # ─────────────────────────────────────────────────────────
+        # id_usuario=0 reservado para visitantes (no tienen fila en `usuarios`)
+        id_sesion = _sessions.register_session(
+            0, mac, ip_asignada, vlan_id, nombre_rol, switch_dpid, in_port
+        )
+        if id_sesion is None:
+            _users.eliminar_visitante(correo)
+            obs.event(
+                Events.AUTH_LOGIN_FAILED,
+                attributes={
+                    "auth.role": nombre_rol,
+                    "auth.correo": correo,
+                    "auth.cause": "ERROR_REGISTRO_SESION",
+                },
+            )
+            return {"ok": False, "motivo": "No se pudo registrar la sesión.",  "codigo_error": "ERROR_REGISTRO_SESION"}
 
-    return {
-        "ok": True,
-        "correo": correo,
-        "nombre_rol": nombre_rol,
-        "vlan_id": vlan_id,
-        "ip_asignada": ip_asignada,
-        "mac": mac,
-        "id_sesion": id_sesion,
-        "es_visitante": True,
-        "session_timeout": Config.VISITANTE_TIMEOUT_SEG,
-    }
+        obs.update_context(session_id=id_sesion)
+
+        _sessions.create_binding(ip_asignada, mac, 0, switch_dpid, in_port, id_sesion)
+        _radius.accounting_start(correo, ip_asignada, mac)
+
+        obs.event(
+                Events.AUTH_SESSION_STARTED,
+                attributes={
+                    "auth.role": nombre_rol,
+                    "auth.correo": correo,
+                },
+            )
+
+        # Emisión de token a M6 — desactivada en modo prueba (ver autenticar())
+        if Config.M6_HABILITADO:
+            # --- INICIO bloque M6 real ---
+            _tokens.emitir_token(correo, nombre_rol, vlan_id, ip_asignada, mac, switch_dpid, in_port)
+            # --- FIN bloque M6 real ---
+        else:
+            print("  [MODO PRUEBA] M6 deshabilitado — no se emite token")
+
+        # ── M5: login visitante exitoso ─────────────────────────────────────
+            obs.event(
+                Events.AUTH_LOGIN_SUCCESS,
+                attributes={
+                    "auth.role": nombre_rol,
+                    "auth.correo": correo,
+                },
+            )  
+
+        return {
+            "ok": True,
+            "correo": correo,
+            "nombre_rol": nombre_rol,
+            "vlan_id": vlan_id,
+            "ip_asignada": ip_asignada,
+            "mac": mac,
+            "id_sesion": id_sesion,
+            "es_visitante": True,
+            "session_timeout": Config.VISITANTE_TIMEOUT_SEG,
+        }
 
 
 def cerrar_sesion(mac: str, id_usuario: int, codigo_pucp: str = None, ip_asignada: str = None, es_visitante: bool = False) -> dict:
@@ -980,21 +1108,35 @@ def cerrar_sesion(mac: str, id_usuario: int, codigo_pucp: str = None, ip_asignad
     Cierra una sesión activa (normal o visitante).
     Retorna {"ok": True/False, "motivo": "..."}.
     """
-    sesion = _sessions.close_session(mac, id_usuario)
-    if not sesion:
-        return {"ok": False, "motivo": "No se encontró sesión activa."}
 
-    if codigo_pucp and ip_asignada:
-        _radius.accounting_stop(codigo_pucp, ip_asignada, mac)
+    context_id = str(uuid.uuid4())
+    obs.update_context(context_id=context_id, host_ip=ip_asignada, user_code=codigo_pucp, user_id=id_usuario)
+    with obs.span("auth.authenticate"):
+        obs.event(
+            Events.AUTH_LOGOUT,
+            attributes={"user.ip": ip_asignada, "user.code": codigo_pucp},
+        )
 
-    if es_visitante and codigo_pucp:
-        _users.eliminar_visitante(codigo_pucp)
-        
-    # ── M5: logout ────────────────────────────────────────────
-    _emitir_evento_m5("logout", usuario=codigo_pucp,  rol=sesion.get("nombre_rol"), ip=ip_asignada, mac=mac, detalle={"motivo": "VOLUNTARIO",  "id_sesion": sesion.get("id_sesion")})
-    # ─────────────────────────────────────────────────────────
+        sesion = _sessions.close_session(mac, id_usuario)
+        if not sesion:
+            return {"ok": False, "motivo": "No se encontró sesión activa."}
 
-    return {"ok": True, "motivo": "Sesión cerrada correctamente."}
+        if codigo_pucp and ip_asignada:
+            _radius.accounting_stop(codigo_pucp, ip_asignada, mac)
+
+        if es_visitante and codigo_pucp:
+            _users.eliminar_visitante(codigo_pucp)
+            
+        # ── M5: logout ────────────────────────────────────────────
+        obs.event(
+            Events.AUTH_SESSION_ENDED,
+            attributes={
+                "auth.role": sesion.get("nombre_rol"),
+                "auth.code": codigo_pucp,
+            },
+        )
+
+        return {"ok": True, "motivo": "Sesión cerrada correctamente."}
 
 
 def obtener_recursos_permitidos(nombre_rol: str) -> list:
