@@ -6,7 +6,20 @@ from .context import Context
 from .events import EventDefinition
 from .telemetry import Telemetry
 
-from opentelemetry._logs import LogRecord, SeverityNumber
+try:
+    from opentelemetry._logs import LogRecord, SeverityNumber
+    OTEL_LOGS_OK = True
+except ImportError:
+    OTEL_LOGS_OK = False
+
+    class SeverityNumber:
+        INFO = "INFO"
+        WARN = "WARN"
+        ERROR = "ERROR"
+
+    class LogRecord:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
 
 
 _RESERVED_ATTRIBUTES = frozenset({

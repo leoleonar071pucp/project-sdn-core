@@ -131,8 +131,16 @@ def auth_login():
     # IP real del host que hizo el request HTTP 
     ip_asignada = request.remote_addr
 
-    resultado = autenticar(usuario, password, ip_asignada)
-    status_code = 200 if resultado["ok"] else 401
+    try:
+        resultado = autenticar(usuario, password, ip_asignada)
+    except Exception as exc:
+        print(f"[web.py] Error en /auth/login: {exc}")
+        resultado = {
+            "ok": False,
+            "motivo": "Error interno al autenticar. Revisa logs de web.py.",
+            "codigo_error": "ERROR_INTERNO_AUTH",
+        }
+    status_code = 200 if resultado.get("ok") else 401
     return jsonify(resultado), status_code
 
 
@@ -150,8 +158,16 @@ def auth_visitante():
     password = data.get("password", "").strip()
     ip_asignada = request.remote_addr
 
-    resultado = autenticar_visitante(correo, password, ip_asignada)
-    status_code = 200 if resultado["ok"] else 401
+    try:
+        resultado = autenticar_visitante(correo, password, ip_asignada)
+    except Exception as exc:
+        print(f"[web.py] Error en /auth/visitante: {exc}")
+        resultado = {
+            "ok": False,
+            "motivo": "Error interno al registrar visitante. Revisa logs de web.py.",
+            "codigo_error": "ERROR_INTERNO_AUTH",
+        }
+    status_code = 200 if resultado.get("ok") else 401
     return jsonify(resultado), status_code
 
 

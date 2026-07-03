@@ -64,10 +64,28 @@ class PortalClient:
     def __init__(self, base_url):
         self.base_url = base_url.rstrip("/")
 
+    def _json_response(self, resp):
+        try:
+            data = resp.json()
+        except ValueError:
+            snippet = (resp.text or "").strip().replace("\n", " ")[:160]
+            return {
+                "ok": False,
+                "codigo_error": "RESPUESTA_NO_JSON",
+                "motivo": f"El portal respondio HTTP {resp.status_code}, pero no devolvio JSON. Resumen: {snippet}",
+            }
+        if isinstance(data, dict):
+            return data
+        return {
+            "ok": False,
+            "codigo_error": "RESPUESTA_INVALIDA",
+            "motivo": "El portal devolvio una respuesta JSON inesperada.",
+        }
+
     def _post(self, endpoint, body):
         try:
             resp = requests.post(f"{self.base_url}{endpoint}", json=body, timeout=15)
-            return resp.json()
+            return self._json_response(resp)
         except requests.exceptions.ConnectionError:
             return {"ok": False, "motivo": f"No se pudo conectar al portal cautivo ({self.base_url}). ¿Está corriendo web.py?"}
         except requests.exceptions.Timeout:
@@ -78,7 +96,7 @@ class PortalClient:
     def _get(self, endpoint):
         try:
             resp = requests.get(f"{self.base_url}{endpoint}", timeout=15)
-            return resp.json()
+            return self._json_response(resp)
         except requests.exceptions.ConnectionError:
             return {"ok": False, "motivo": f"No se pudo conectar al portal cautivo ({self.base_url})."}
         except Exception as e:

@@ -509,6 +509,93 @@ class SessionManager:
         finally:
             conn.close()
 
+    def validate_login_binding(self, id_usuario, ip_asignada, mac,
+                               switch_dpid, in_port):
+        """
+        Valida que una nueva autenticacion no duplique usuario ni host.
+
+        La autorizacion no queda atada solo a IP o MAC: se valida el binding
+        completo resuelto por M6/ONOS: IP + MAC + switch + puerto fisico.
+        """
+        conn = self.db.get_connection()
+        if not conn:
+            return True, None
+        try:
+            cur = conn.cursor(dictionary=True)
+            filtros = [
+                "s.ip_asignada = %s",
+                "s.mac_address = %s",
+                "(s.switch_dpid = %s AND s.in_port = %s)",
+            ]
+            params = [ip_asignada, mac, switch_dpid, in_port]
+            if int(id_usuario or 0) > 0:
+                filtros.insert(0, "s.id_usuario = %s")
+                params.insert(0, id_usuario)
+
+            cur.execute(f"""
+                SELECT s.id_sesion, s.id_usuario, s.mac_address AS mac,
+                       s.ip_asignada, s.vlan_id, s.nombre_rol,
+                       s.switch_dpid, s.in_port, s.login_timestamp,
+                       u.codigo_pucp
+                FROM sesiones_activas s
+                LEFT JOIN usuarios u ON s.id_usuario = u.id_usuario
+                WHERE s.estado = 'ACTIVA'
+                  AND ({' OR '.join(filtros)})
+                ORDER BY s.login_timestamp DESC
+            """, tuple(params))
+
+            for sesion in cur.fetchall():
+                same_user = (
+                    int(id_usuario or 0) > 0
+                    and int(sesion.get("id_usuario") or -1) == int(id_usuario)
+                )
+                same_ip = sesion.get("ip_asignada") == ip_asignada
+                same_mac = (sesion.get("mac") or "").lower() == mac.lower()
+                same_switch = sesion.get("switch_dpid") == switch_dpid
+                same_port = int(sesion.get("in_port") or -1) == int(in_port)
+                same_binding = same_ip and same_mac and same_switch and same_port
+
+                if same_user and same_binding:
+                    return False, {
+                        "codigo_error": "SESION_YA_ACTIVA",
+                        "motivo": "Este usuario ya tiene una sesion activa en este host.",
+                        "sesion": _serializar_sesion(sesion),
+                    }
+                if same_user:
+                    return False, {
+                        "codigo_error": "USER_ALREADY_ACTIVE_OTHER_HOST",
+                        "motivo": "Este usuario ya tiene una sesion activa en otro equipo. Cierra esa sesion primero.",
+                        "sesion": _serializar_sesion(sesion),
+                    }
+                if same_binding:
+                    return False, {
+                        "codigo_error": "HOST_ALREADY_AUTHENTICATED",
+                        "motivo": "Este equipo ya tiene una sesion activa con otro usuario.",
+                        "sesion": _serializar_sesion(sesion),
+                    }
+                if same_ip or same_mac:
+                    return False, {
+                        "codigo_error": "IP_MAC_BINDING_MISMATCH",
+                        "motivo": "La IP o MAC ya esta asociada a otra sesion activa.",
+                        "sesion": _serializar_sesion(sesion),
+                    }
+                if same_switch and same_port:
+                    return False, {
+                        "codigo_error": "HOST_PORT_ALREADY_ACTIVE",
+                        "motivo": "El puerto fisico del host ya tiene otra sesion activa.",
+                        "sesion": _serializar_sesion(sesion),
+                    }
+
+            return True, None
+        except Exception as e:
+            print(f"  [SessionManager] Error al validar binding de login: {e}")
+            return False, {
+                "codigo_error": "ERROR_VALIDACION_SESION",
+                "motivo": "No se pudo validar si el host ya tiene una sesion activa.",
+            }
+        finally:
+            conn.close()
+
     def create_binding(self, ip, mac, id_usuario, switch_dpid, in_port, id_sesion):
         conn = self.db.get_connection()
         if not conn:
@@ -876,7 +963,6 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
 
         obs.update_context(user_id=id_usuario, user_role=nombre_rol)
 
-        sesion_existente = _sessions.get_session_by_usuario(id_usuario) 
         # ── Resolución de host (MAC, switch, puerto) ─────────────────────────────
         # En modo de prueba (M6_HABILITADO=False) se omite la llamada real a M6
         # y se usan valores dummy, para poder seguir probando RADIUS + MySQL
@@ -914,6 +1000,26 @@ def autenticar(codigo_pucp: str, password: str, ip_asignada: str) -> dict:
                 },
             )
             return {"ok": False, "motivo": f"Anti-spoofing: {motivo}",  "codigo_error": "ANTISPOOFING"}
+
+        login_ok, conflicto = _sessions.validate_login_binding(
+            id_usuario, ip_asignada, mac, switch_dpid, in_port
+        )
+        if not login_ok:
+            obs.event(
+                Events.AUTH_LOGIN_FAILED,
+                attributes={
+                    "auth.duration.ms": duracion_ms,
+                    "network.ip": ip_asignada,
+                    "network.mac": mac,
+                    "network.switch_dpid": switch_dpid,
+                    "network.in_port": in_port,
+                    "auth.cause": (conflicto or {}).get("codigo_error", "ERROR_VALIDACION_SESION"),
+                },
+            )
+            return {"ok": False, **(conflicto or {
+                "motivo": "No se pudo validar la sesion activa.",
+                "codigo_error": "ERROR_VALIDACION_SESION",
+            })}
 
         id_sesion = _sessions.register_session(
             id_usuario, mac, ip_asignada, vlan_id, nombre_rol, switch_dpid, in_port
@@ -1068,6 +1174,28 @@ def autenticar_visitante(correo: str, password: str, ip_asignada: str) -> dict:
             )
             _users.eliminar_visitante(correo)
             return {"ok": False, "motivo": f"Anti-spoofing: {motivo}", "codigo_error": "ANTISPOOFING"}
+
+        login_ok, conflicto = _sessions.validate_login_binding(
+            0, ip_asignada, mac, switch_dpid, in_port
+        )
+        if not login_ok:
+            obs.event(
+                Events.AUTH_LOGIN_FAILED,
+                attributes={
+                    "user.correo": correo,
+                    "user.visitante": True,
+                    "network.ip": ip_asignada,
+                    "network.mac": mac,
+                    "network.switch_dpid": switch_dpid,
+                    "network.in_port": in_port,
+                    "auth.cause": (conflicto or {}).get("codigo_error", "ERROR_VALIDACION_SESION"),
+                },
+            )
+            _users.eliminar_visitante(correo)
+            return {"ok": False, **(conflicto or {
+                "motivo": "No se pudo validar la sesion activa.",
+                "codigo_error": "ERROR_VALIDACION_SESION",
+            })}
 
         # id_usuario=0 reservado para visitantes (no tienen fila en `usuarios`)
         id_sesion = _sessions.register_session(

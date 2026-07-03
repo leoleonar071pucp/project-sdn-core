@@ -1,14 +1,29 @@
-from opentelemetry import trace, _logs
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk._logs import LoggerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
-
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
-
-from .resources import ResourceFactory
 from dataclasses import dataclass
+from contextlib import nullcontext
+
+try:
+    from .resources import ResourceFactory
+    from opentelemetry import trace, _logs
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+    OTEL_OK = True
+except ImportError:
+    OTEL_OK = False
+
+
+class _NoopTracer:
+    def start_as_current_span(self, _name):
+        return nullcontext()
+
+
+class _NoopLogger:
+    def emit(self, _record):
+        return None
 
 @dataclass
 class TelemetryConfig:
@@ -34,6 +49,11 @@ class Telemetry:
             return
 
         self._config = config
+        if not OTEL_OK:
+            self._tracer = _NoopTracer()
+            self._logger = _NoopLogger()
+            self._initialized = True
+            return
 
         resource = ResourceFactory.build(
             service_name=config.service_name,
