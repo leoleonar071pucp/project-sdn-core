@@ -1,0 +1,16 @@
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: "M6 Webhook"
+    receivers:
+      - uid: "m6-webhook"
+        type: "webhook"
+        settings:
+          url: "http://192.168.200.211:8080/mitigate"   #192.168.201.251
+          httpMethod: "POST"
+          maxAlerts: 10
+          # authorization:
+          #   credentials: "Bearer token"
+          #   type: "Authorization"
+    default: true

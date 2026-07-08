@@ -37,6 +37,9 @@ exporters:
     endpoint: http://loki:3100/otlp
     tls:
       insecure: true
+    
+  prometheus:
+    endpoint: 0.0.0.0:8889
 
   debug:
     verbosity: basic
@@ -62,4 +65,14 @@ service:
         - batch
       exporters:
         - otlp_http/loki
+        - debug
+    
+    metrics:
+      receivers:
+        - otlp
+      processors:
+        - memory_limiter
+        - batch
+      exporters:
+        - prometheus
         - debug

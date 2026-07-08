@@ -1,0 +1,202 @@
+apiVersion: 1
+
+groups:
+  - name: SDN Alerts
+    folder: SDN
+    interval: 30s  # Cada 30 segundos se evalúa
+
+    rules:
+      # ==================================================================
+      # 1. Switch availability (basado en métrica gauge 1/0)
+      # ==================================================================
+      - uid: switch_down
+        title: "Switch {{ $labels.device }} is DOWN"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300  # últimos 5 minutos
+              to: 0
+            datasourceUid: prometheus   # Ajusta según el UID de tu datasource Prometheus
+            model:
+              expr: sdn_device_available == 0
+              intervalMs: 30000
+              maxDataPoints: 43200
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+        for: 1m   # Espera 1 minuto para confirmar
+        labels:
+          severity: critical
+          category: availability
+        annotations:
+          summary: "Switch {{ $labels.device }} is down"
+          description: "Switch {{ $labels.device }} has been unavailable for more than 1 minute."
+
+      # ==================================================================
+      # 2. Link down
+      # ==================================================================
+      - uid: link_down
+        title: "Link {{ $labels.link }} is DOWN"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sdn_link_up == 0
+              intervalMs: 30000
+              maxDataPoints: 43200
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+        for: 30s
+        labels:
+          severity: critical
+          category: topology
+        annotations:
+          summary: "Link {{ $labels.link }} is down"
+          description: "Link from {{ $labels.src_device }}:{{ $labels.src_port }} to {{ $labels.dst_device }}:{{ $labels.dst_port }} is down."
+
+      # ==================================================================
+      # 3. Flow limit exceeded (valor actual)
+      # ==================================================================
+      - uid: flow_limit_exceeded
+        title: "Switch {{ $labels.device }} has exceeded flow limit"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sdn_flows_current > 1000   # Ajusta el umbral
+              intervalMs: 30000
+              maxDataPoints: 43200
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: warning
+          category: capacity
+        annotations:
+          summary: "Switch {{ $labels.device }} has {{ $value }} flows"
+          description: "Flow table usage exceeded threshold of 1000 flows."
+
+      # ==================================================================
+      # 4. Flow installation spike (incremento en 5 min)
+      # ==================================================================
+      - uid: flow_spike
+        title: "Flow installation spike on {{ $labels.device }}"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(sdn_flows_installed_total[5m]) > 500   # Ajusta
+              intervalMs: 30000
+              maxDataPoints: 43200
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: warning
+          category: performance
+        annotations:
+          summary: "{{ $value }} new flows installed in 5 minutes"
+          description: "Switch {{ $labels.device }} installed {{ $value }} new flows in the last 5 minutes."
+
+      # ==================================================================
+      # 5. Port errors (incremento en 5 min)
+      # ==================================================================
+      - uid: port_errors
+        title: "Port errors on {{ $labels.device }}:{{ $labels.port }}"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: |
+                increase(sdn_port_rx_errors_total[5m]) > 100
+                or
+                increase(sdn_port_tx_errors_total[5m]) > 100
+              intervalMs: 30000
+              maxDataPoints: 43200
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: warning
+          category: errors
+        annotations:
+          summary: "Port errors detected"
+          description: "Port {{ $labels.port }} on switch {{ $labels.device }} has {{ $value }} errors in the last 5 minutes."
+
+      # ==================================================================
+      # 6. Port drops (incremento en 5 min)
+      # ==================================================================
+      - uid: port_drops
+        title: "Packet drops on {{ $labels.device }}:{{ $labels.port }}"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: |
+                increase(sdn_port_rx_dropped_total[5m]) > 500
+                or
+                increase(sdn_port_tx_dropped_total[5m]) > 500
+              intervalMs: 30000
+              maxDataPoints: 43200
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: warning
+          category: errors
+        annotations:
+          summary: "Packet drops detected"
+          description: "Port {{ $labels.port }} on switch {{ $labels.device }} dropped {{ $value }} packets in the last 5 minutes."
+
+      # ==================================================================
+      # 7. Switch CPU high (si expones esta métrica)
+      # ==================================================================
+      - uid: switch_cpu_high
+        title: "High CPU on switch {{ $labels.device }}"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sdn_switch_cpu_usage > 80
+              intervalMs: 30000
+              maxDataPoints: 43200
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+          category: performance
+        annotations:
+          summary: "Switch CPU usage at {{ $value }}%"
+          description: "Switch {{ $labels.device }} has {{ $value }}% CPU usage."

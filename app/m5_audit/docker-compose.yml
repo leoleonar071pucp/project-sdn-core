@@ -21,6 +21,8 @@ services:
         condition: service_healthy
       tempo:
         condition: service_healthy
+      prometheus:
+        condition: service_started
 
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://localhost:3000/api/health || exit 1"]
@@ -73,6 +75,22 @@ services:
     networks:
       - observability
 
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: m5-prometheus
+    # restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+
+    networks:
+      - observability
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.144.0
     container_name: m5-otel-collector
@@ -89,15 +107,36 @@ services:
         condition: service_healthy
       tempo:
         condition: service_healthy
-
-#    healthcheck:
-#      test: ["CMD", "curl", "-f", "http://127.0.0.1:13133"]
-#      interval: 25s
-#      timeout: 10s
-#      retries: 3
+      prometheus:
+        condition: service_started
 
     networks:
       - observability
+
+  infra-monitoring:
+    build: ./infra-monitoring
+
+    container_name: m5-infra-monitoring
+
+    volumes:
+      - ./infra-monitoring:/app
+      - ./observability:/app/observability
+
+    environment:
+
+      COLLECTOR_HOST: 127.0.0.1
+      COLLECTOR_PORT: 4318
+
+      ONOS_HOST: 192.168.200.200
+      ONOS_PORT: 8181
+
+      ONOS_USERNAME: onos
+      ONOS_PASSWORD: rocks
+    
+    networks:
+      - observability
+
+#    restart: unless-stopped
 
 networks:
 
@@ -108,3 +147,4 @@ volumes:
   grafana-data:
   loki-data:
   tempo-data:
+  prometheus-data:

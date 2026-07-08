@@ -184,20 +184,6 @@ class Events:
         message="Flow removed successfully.",
     )
 
-    SWITCH_CONNECTED = EventDefinition(
-        name="switch.connected",
-        domain="network",
-        severity="INFO",
-        message="Switch connected to the SDN controller.",
-    )
-
-    SWITCH_DISCONNECTED = EventDefinition(
-        name="switch.disconnected",
-        domain="network",
-        severity="WARN",
-        message="Switch disconnected from the SDN controller.",
-    )
-
     # ==================================================================
     # Security (M3 / M4)
     # ==================================================================
@@ -256,4 +242,92 @@ class Events:
         domain="security",
         severity="ERROR",
         message="Threat mitigation failed.",
+    )
+
+    # ==================================================================
+    # Monitoring (M5)
+    # ==================================================================
+
+    MONITORING_STARTED = EventDefinition(
+        name="monitoring.started",
+        domain="monitoring",
+        severity="INFO",
+        message="Monitoring service started.",
+    )
+
+    MONITORING_STOPPED = EventDefinition(
+        name="monitoring.stopped",
+        domain="monitoring",
+        severity="INFO",
+        message="Monitoring service stopped.",
+    )
+
+    MONITORING_FAILED = EventDefinition(
+        name="monitoring.failed",
+        domain="monitoring",
+        severity="ERROR",
+        message="Monitoring service failed.",
+    )
+
+    SWITCH_CONNECTED = EventDefinition(
+        name="switch.connected",
+        domain="network",
+        severity="INFO",
+        message="Switch connected to the SDN controller.",
+    )
+
+    SWITCH_DISCONNECTED = EventDefinition(
+        name="switch.disconnected",
+        domain="network",
+        severity="WARN",
+        message="Switch disconnected from the SDN controller.",
+    )
+
+    SWITCH_DOWN = EventDefinition(
+        name="switch.down",
+        domain="network",
+        severity="WARN",
+        message="Switch is down or unavailable.",
+    )
+
+    LINK_UP = EventDefinition(
+        name="link.up",
+        domain="network",
+        severity="INFO",
+        message="Link is up.",
+    )
+
+    LINK_DOWN = EventDefinition(
+        name="link.down",
+        domain="network",
+        severity="WARN",
+        message="Link is down.",
+    )
+
+    PORT_ERROR_THRESHOLD_EXCEEDED = EventDefinition(
+        name="port.error.threshold.exceeded",
+        domain="network",
+        severity="WARN",
+        message="Port error threshold exceeded.",
+    )
+
+    PORT_DROP_THRESHOLD_EXCEEDED = EventDefinition(
+        name="port.drop.threshold.exceeded",
+        domain="network",
+        severity="WARN",
+        message="Port drop threshold exceeded.",
+    )
+
+    FLOW_THRESHOLD_EXCEEDED = EventDefinition(
+        name="flow.threshold.exceeded",
+        domain="network",
+        severity="WARN",
+        message="Flow threshold exceeded.",
+    )
+
+    FLOW_INSTALLATION_SPIKE = EventDefinition(
+        name="flow.installation.spike",
+        domain="network",
+        severity="WARN",
+        message="Sudden spike in flow installations detected.",
     )
