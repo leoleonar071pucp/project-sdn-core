@@ -58,11 +58,8 @@ class MonitoringService:
                     #
                     else:
                         diff = self.state.update(snapshot)
-                        self.metrics.set_snapshot(snapshot)
-                        self.alerts.evaluate(
-                            snapshot,
-                            diff,
-                        )
+                        self.metrics.set_snapshot(snapshot, diff)
+                        self.alerts.evaluate(snapshot, diff)
                         self.retry_delay = 5
 
                     #
@@ -76,7 +73,7 @@ class MonitoringService:
                         Events.MONITORING_FAILED,
                         attributes={
                             "error": str(e),
-                            "retry_in": self.retry_delay+" seconds",
+                            "retry_in": str(self.retry_delay)+" seconds",
                         },
                     )
                     time.sleep(self.retry_delay)

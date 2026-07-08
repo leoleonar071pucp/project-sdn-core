@@ -19,6 +19,7 @@ class Metrics:
     def __init__(self, config):
 
         self.snapshot = None
+        self.diff = None
 
         resource = Resource.create(
             {
@@ -118,10 +119,38 @@ class Metrics:
             )
 
 
-    def set_snapshot(self, snapshot):
+        self.meter.create_observable_gauge(
+            name="onos.device.flows.delta",
+            description="New flows installed since previous snapshot",
+            callbacks=[self._observe_flow_deltas],
+        )
+
+        self.meter.create_observable_gauge(
+            name="onos.device.table.flows.delta",
+            description="Flow delta per OpenFlow table",
+            callbacks=[self._observe_table_flow_deltas],
+        )
+
+        
+        self.meter.create_observable_gauge(
+            name="onos.port.rx.bps",
+            description="RX bandwidth per port in bits per second",
+            callbacks=[
+                self._observe_port_rx_bps
+            ],
+        )
+
+        self.meter.create_observable_gauge(
+            name="onos.port.tx.bps",
+            description="TX bandwidth per port in bits per second",
+            callbacks=[
+                self._observe_port_tx_bps
+            ],
+        )
+
+    def set_snapshot(self, snapshot, diff=None):
         self.snapshot = snapshot
-
-
+        self.diff = diff
 
     def _observe_switches_total(self, options):
         if self.snapshot is None:
@@ -228,6 +257,78 @@ class Metrics:
 
         return callback
 
+    def _observe_flow_deltas(self, options):
+        if self.diff is None:
+            return
+
+        for flow in self.diff.flow_deltas.values():
+            yield Observation(
+                value=flow.delta_total_flows,
+                attributes={
+                    "device": flow.device,
+                },
+            )
+
+    def _observe_table_flow_deltas(self, options):
+        if self.diff is None:
+            return
+
+        for flow in self.diff.flow_deltas.values():
+
+            for table_id, delta in flow.delta_tables.items():
+
+                yield Observation(
+                    value=delta,
+                    attributes={
+                        "device": flow.device,
+                        "table": table_id,
+                    },
+                )
+
+    def _observe_port_rx_bps(self, options):
+        if self.diff is None:
+            return
+
+        for delta in self.diff.port_deltas.values():
+            if delta.durationSec <= 0:
+                continue
+
+            bps = (
+                delta.delta_rx_bytes * 8
+                /
+                delta.durationSec
+            )
+
+            yield Observation(
+                value=bps,
+                attributes={
+                    "device": delta.device,
+                    "port": str(delta.port),
+                },
+            )
+
+
+    def _observe_port_tx_bps(self, options):
+        if self.diff is None:
+            return
+
+        for delta in self.diff.port_deltas.values():
+            if delta.durationSec <= 0:
+                continue
+
+            bps = (
+                delta.delta_tx_bytes * 8
+                /
+                delta.durationSec
+            )
+
+            yield Observation(
+                value=bps,
+                attributes={
+                    "device": delta.device,
+                    "port": str(delta.port),
+                },
+            )
 
     def shutdown(self):
         self.provider.shutdown()
