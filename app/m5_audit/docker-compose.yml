@@ -134,7 +134,8 @@ services:
       ONOS_PASSWORD: rocks
     
     depends_on:
-      otel_collecotr: service_started
+      otel-collector: 
+        condition: service_started
 
     networks:
       - observability
