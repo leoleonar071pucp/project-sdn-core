@@ -23,7 +23,7 @@ class Metrics:
 
         resource = Resource.create(
             {
-                "service.name": "m3_monitoring",
+                "service.name": "m5_observability",
             }
         )
 
@@ -48,7 +48,7 @@ class Metrics:
         self.provider = provider
 
         self.meter = metrics.get_meter(
-            "m3_monitoring",
+            "m5_observability",
             "1.0.0",
         )
 
