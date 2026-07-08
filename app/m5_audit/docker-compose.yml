@@ -124,7 +124,7 @@ services:
 
     environment:
 
-      COLLECTOR_HOST: 127.0.0.1
+      COLLECTOR_HOST: otel-collector
       COLLECTOR_PORT: 4318
 
       ONOS_HOST: 192.168.201.200
@@ -133,6 +133,9 @@ services:
       ONOS_USERNAME: onos
       ONOS_PASSWORD: rocks
     
+    depends_on:
+      otel_collecotr: service_started
+
     networks:
       - observability
 

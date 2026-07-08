@@ -12,7 +12,7 @@ class Config:
 
     poll_interval: int = int(os.getenv("POLL_INTERVAL", "5"))
 
-    collector_host: str = os.getenv("COLLECTOR_HOST", "192.168.200.251")    #localhost
+    collector_host: str = os.getenv("COLLECTOR_HOST", "otel-collector")
     collector_port: int = int(os.getenv("COLLECTOR_PORT", "4318"))
 
     verify_ssl: bool = False
