@@ -5,7 +5,7 @@ class OnosClient:
     
     def __init__(self, config):
         self.base_url = (
-            f"https://{config.onos_host}:{config.onos_port}/onos/v1"
+            f"http://{config.onos_host}:{config.onos_port}/onos/v1"
         )
 
         self.session = requests.Session()
