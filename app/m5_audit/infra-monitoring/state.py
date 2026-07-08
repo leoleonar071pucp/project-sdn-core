@@ -165,15 +165,15 @@ class State:
             tables = {}
 
             table_ids = (
-                previous.table_counts.keys()
-                | current.table_counts.keys()
+                previous.tables.keys()
+                | current.tables.keys()
             )
 
             for table in table_ids:
 
                 tables[table] = (
-                    current.table_counts.get(table, 0)
-                    - previous.table_counts.get(table, 0)
+                    current.tables.get(table, 0)
+                    - previous.tables.get(table, 0)
                 )
 
             deltas[key] = FlowDelta(
