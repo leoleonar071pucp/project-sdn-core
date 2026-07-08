@@ -9,10 +9,32 @@ groups:
       # Puerto saturado por tráfico (bps)
       - uid: port_traffic_stress
         title: "High traffic on {{ $labels.device }}:{{ $labels.port }}"
-        condition: A
+        condition: C
 
         data:
           - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sdn_port_rx_bps
+              intervalMs: 30000
+              maxDataPoints: 43200
+              refId: A
+
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sdn_port_tx_bps
+              intervalMs: 30000
+              maxDataPoints: 43200
+              refId: B
+
+          - refId: C
             relativeTimeRange:
               from: 300
               to: 0
@@ -22,12 +44,13 @@ groups:
                 (sdn_port_rx_bps > 10000000) or (sdn_port_tx_bps > 10000000)
               intervalMs: 30000
               maxDataPoints: 43200
-              refId: A
+              refId: C
 
         noDataState: OK
         execErrState: Error
         for: 15s
         labels:
+          alert_type: port_traffic_stress
           severity: warning
           category: performance
         annotations:
@@ -35,7 +58,6 @@ groups:
           description: |
             Port {{ $labels.device }}:{{ $labels.port }}
             exceeded 10 Mbps.
-            Current value: {{ $value }} bps.
 
       # Switch down
       - uid: switch_down

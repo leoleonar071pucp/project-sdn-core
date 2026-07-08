@@ -7,10 +7,18 @@ contactPoints:
       - uid: "m6-webhook"
         type: "webhook"
         settings:
-          url: "http://192.168.200.211:8080/mitigate"   #192.168.201.251
+          url: "http://127.0.0.1:8080/mitigate"
+          httpMethod: "POST"
+          payload:
+            template: '{{ template "m6.port_traffic_stress" . }}'
+          maxAlerts: 10
+
+  - orgId: 1
+    name: "Dummy"
+    receivers:
+      - uid: "dummy-webhook"
+        type: "webhook"
+        settings:
+          url: "http://127.0.0.1:65535/dummydiscard"
           httpMethod: "POST"
           maxAlerts: 10
-          # authorization:
-          #   credentials: "Bearer token"
-          #   type: "Authorization"
-    default: true
