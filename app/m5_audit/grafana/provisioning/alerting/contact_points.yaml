@@ -7,7 +7,7 @@ contactPoints:
       - uid: "m6-webhook"
         type: "webhook"
         settings:
-          url: "http://127.0.0.1:8080/mitigate"
+          url: "http://127.0.0.1:8080/m6/security/rate-limit"
           httpMethod: "POST"
           payload:
             template: '{{ template "m6.port_traffic_stress" . }}'

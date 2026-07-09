@@ -24,6 +24,8 @@ class Metrics:
         resource = Resource.create(
             {
                 "service.name": "m5_observability",
+                "service.version": "1.0.0",
+                "service.instance.id": "m5_observability",
             }
         )
 
