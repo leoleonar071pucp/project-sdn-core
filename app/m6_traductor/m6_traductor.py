@@ -52,7 +52,42 @@ try:
 except ImportError:
     MYSQL_OK = False
 
-from observability import (Observability,TelemetryConfig, Events)
+try:
+    from observability import (Observability, TelemetryConfig, Events)
+except Exception as exc:
+    print(f"[M6] Observability disabled: {exc}")
+
+    class TelemetryConfig:
+        def __init__(self, service_name=None, service_version=None, **_kwargs):
+            self.service_name = service_name
+            self.service_version = service_version
+
+    class _NoopSpan:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class Observability:
+        def __init__(self, _config=None):
+            pass
+
+        def span(self, _name):
+            return _NoopSpan()
+
+        def event(self, *_args, **_kwargs):
+            return None
+
+        def update_context(self, **_kwargs):
+            return None
+
+    class Events:
+        POLICY_QUERY = "policy.query"
+        POLICY_QUERY_RESULT = "policy.query.result"
+        FLOW_INSTALL_REQUESTED = "flow.install.requested"
+        FLOW_INSTALLED = "flow.installed"
+        FLOW_REMOVED = "flow.removed"
 
 obsConfig = TelemetryConfig(
     service_name="m6-traductor",
@@ -131,6 +166,21 @@ class Config:
     MONITORING_GRE_INSTALL_ON_STARTUP = env_bool.__func__(
         "MONITORING_GRE_INSTALL_ON_STARTUP", False
     )
+    FAILOVER_ANALYSIS_ENABLED = env_bool.__func__(
+        "FAILOVER_ANALYSIS_ENABLED", True
+    )
+    FAILOVER_AUTO_REINSTALL_ENABLED = env_bool.__func__(
+        "FAILOVER_AUTO_REINSTALL_ENABLED", False
+    )
+    FAILOVER_RECOVERY_COOLDOWN = int(os.getenv(
+        "FAILOVER_RECOVERY_COOLDOWN", "10"
+    ))
+    FAILOVER_RECOVERY_MAX_SESSIONS = int(os.getenv(
+        "FAILOVER_RECOVERY_MAX_SESSIONS", "20"
+    ))
+    FAILOVER_EVENT_DEDUP_WINDOW = int(os.getenv(
+        "FAILOVER_EVENT_DEDUP_WINDOW", "15"
+    ))
     PORTAL_SYNC_INTERVAL = int(os.getenv("PORTAL_SYNC_INTERVAL", "60"))
     PORTAL_FORWARD_PERMANENT = env_bool.__func__(
         "PORTAL_FORWARD_PERMANENT", True
@@ -187,6 +237,15 @@ class Config:
     }
 
     MONITORING_GRE_DST = os.getenv("MONITORING_GRE_DST", "192.168.200.213")
+    MONITORING_GRE_SOURCE_DEVICE = os.getenv(
+        "MONITORING_GRE_SOURCE_DEVICE", "of:00006a0757adfc4e"
+    )
+    MONITORING_GRE_EGRESS_DEVICE = os.getenv(
+        "MONITORING_GRE_EGRESS_DEVICE", "of:00007e3892af7141"
+    )
+    MONITORING_GRE_EGRESS_PORT = int(os.getenv(
+        "MONITORING_GRE_EGRESS_PORT", "5"
+    ))
     MONITORING_GRE_FLOWS = [
         {
             "name": "sw4_gre_to_sw3",
@@ -219,6 +278,9 @@ class Config:
     PRIO_T0_USUARIO = 35000   # T0: enforcement por MAC post-auth
     PRIO_T1_SESSION_GATE = 39900  # T1: flow marcador de sesion idle
     PRIO_T0_ATAQUE  = 39000   # T0: bloqueo atacante (instalado por M4)
+    PRIO_T0_RATE_LIMIT = 38900  # T0: meter temporal por saturacion/M5
+    RATE_LIMIT_DEFAULT_TTL = int(os.getenv("RATE_LIMIT_DEFAULT_TTL", "300"))
+    RATE_LIMIT_DEFAULT_PPS = int(os.getenv("RATE_LIMIT_DEFAULT_PPS", "50"))
     DATA_FLOW_TIMEOUT = int(os.getenv("DATA_FLOW_TIMEOUT", "300"))
 
     SECURITY_MITIGATION_POLICIES = {
@@ -693,6 +755,30 @@ class FlowBuilder:
             "treatment": {"clearDeferred": True, "instructions": []}
         }
 
+    def t0_rate_limit_port(self, device_id, in_port, meter_id,
+                           src_mac=None, src_ip=None, ttl=None, prio=None):
+        """T0 rate-limit: aplica meter y continua el pipeline normal en T1."""
+        criteria = [
+            {"type": "IN_PORT", "port": int(in_port)},
+            {"type": "ETH_TYPE", "ethType": "0x0800"},
+        ]
+        if src_mac:
+            criteria.append({"type": "ETH_SRC", "mac": src_mac})
+        if src_ip:
+            criteria.append({"type": "IPV4_SRC", "ip": f"{src_ip}/32"})
+        return {
+            "priority":    int(prio or Config.PRIO_T0_RATE_LIMIT),
+            "isPermanent": False,
+            "timeout":     int(ttl or Config.RATE_LIMIT_DEFAULT_TTL),
+            "deviceId":    device_id,
+            "tableId":     0,
+            "selector": {"criteria": criteria},
+            "treatment": {"instructions": [
+                {"type": "METER", "meterId": str(meter_id)},
+                {"type": "TABLE", "tableId": 1},
+            ]}
+        }
+
     def t0_return_flow(self, device_id, dst_mac, out_port, session_timeout=28800):
         """T0 prio200 — respuesta de servidores → host por ETH_DST (sin restricción de IN_PORT)."""
         return {
@@ -1084,6 +1170,21 @@ class ONOSClient:
             print(f"  [ONOS] Error GET /hosts: {e}")
         return []
 
+    def get_host_by_location(self, device_id, port):
+        """Busca host aprendido por ONOS en un switch/puerto concreto."""
+        port = str(port)
+        for host in self.get_hosts():
+            for loc in host.get("locations") or []:
+                if loc.get("elementId") == device_id and str(loc.get("port")) == port:
+                    ips = host.get("ipAddresses") or []
+                    return {
+                        "mac": host.get("mac"),
+                        "ip": ips[0] if ips else None,
+                        "switch_dpid": device_id,
+                        "in_port": int(port),
+                    }
+        return None
+
     def get_links(self):
         """Devuelve la lista cruda de enlaces inter-switch vistos por ONOS."""
         if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
@@ -1168,6 +1269,98 @@ class ONOSClient:
             print(f"  [ONOS] Error GET /devices: {e}")
         return []
 
+    def get_devices_raw(self):
+        """Lista cruda de devices de ONOS, incluyendo availability/metadata."""
+        if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
+            return []
+        try:
+            resp = requests.get(
+                f"{self.url}/onos/v1/devices", auth=self.auth, timeout=5
+            )
+            if resp.status_code == 200:
+                return resp.json().get("devices", [])
+            print(f"  [ONOS] Error GET /devices: HTTP {resp.status_code}")
+        except Exception as e:
+            print(f"  [ONOS] Error GET /devices: {e}")
+        return []
+
+    def calcular_pasos_con_fallas(self, src_switch, src_port, dst_switch,
+                                  dst_port, links, failed_devices=None,
+                                  failed_links=None):
+        """
+        Calcula pasos con una topología simulada donde algunos switches/links
+        fueron removidos. No toca ONOS ni instala flows.
+        """
+        failed_devices = {str(d) for d in (failed_devices or []) if d}
+        failed_endpoints = set()
+        for link in failed_links or []:
+            for endpoint in ("src", "dst"):
+                ep = link.get(endpoint, {}) if isinstance(link, dict) else {}
+                dev, port = ep.get("device"), ep.get("port")
+                if dev and port is not None:
+                    failed_endpoints.add((str(dev), str(port)))
+
+        if src_switch in failed_devices or dst_switch in failed_devices:
+            return []
+        if src_switch == dst_switch:
+            if (str(src_switch), str(src_port)) in failed_endpoints:
+                return []
+            if (str(dst_switch), str(dst_port)) in failed_endpoints:
+                return []
+            return [(src_switch, int(src_port), int(dst_port))]
+
+        adjacency = defaultdict(list)
+        link_by_pair = {}
+        for link in links:
+            if link.get("state") not in (None, "ACTIVE"):
+                continue
+            src = link.get("src", {})
+            dst = link.get("dst", {})
+            src_dev, dst_dev = src.get("device"), dst.get("device")
+            src_p, dst_p = src.get("port"), dst.get("port")
+            if not (src_dev and dst_dev and str(src_p).isdigit()
+                    and str(dst_p).isdigit()):
+                continue
+            if src_dev in failed_devices or dst_dev in failed_devices:
+                continue
+            if (str(src_dev), str(src_p)) in failed_endpoints:
+                continue
+            if (str(dst_dev), str(dst_p)) in failed_endpoints:
+                continue
+            adjacency[src_dev].append(dst_dev)
+            link_by_pair.setdefault((src_dev, dst_dev), (int(src_p), int(dst_p)))
+
+        queue = deque([(src_switch, [src_switch])])
+        visited = {src_switch}
+        path = None
+        while queue:
+            current, current_path = queue.popleft()
+            for neighbor in sorted(adjacency.get(current, [])):
+                if neighbor in visited:
+                    continue
+                next_path = current_path + [neighbor]
+                if neighbor == dst_switch:
+                    path = next_path
+                    queue.clear()
+                    break
+                visited.add(neighbor)
+                queue.append((neighbor, next_path))
+
+        if not path:
+            return []
+
+        steps = []
+        in_port = int(src_port)
+        for current, nxt in zip(path, path[1:]):
+            link_ports = link_by_pair.get((current, nxt))
+            if not link_ports:
+                return []
+            out_port, next_in_port = link_ports
+            steps.append((current, in_port, out_port))
+            in_port = next_in_port
+        steps.append((dst_switch, in_port, int(dst_port)))
+        return steps
+
     def get_access_ports(self, device_id):
         """
         Devuelve los puertos de acceso (hacia hosts) de un switch.
@@ -1221,6 +1414,100 @@ class ONOSClient:
     def eliminar_flow(self, device_id, flow_id):
         return self._delete_flow(device_id, flow_id)
 
+    def crear_meter_rate_limit(self, device_id, rate_pps=None):
+        rate_pps = int(rate_pps or Config.RATE_LIMIT_DEFAULT_PPS)
+        if not (
+            Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_WRITES_ENABLED
+        ):
+            return f"SIM-{device_id[-4:]}-{rate_pps}"
+        payload = {
+            "deviceId": device_id,
+            "unit": "PKTS_PER_SEC",
+            "burst": True,
+            "isBurst": True,
+            "bands": [{
+                "type": "DROP",
+                "rate": rate_pps,
+                "burstSize": max(rate_pps * 2, 1),
+            }],
+        }
+        try:
+            resp = requests.post(
+                f"{self.url}/onos/v1/meters/{device_id}",
+                auth=self.auth,
+                json=payload,
+                timeout=5,
+            )
+            if resp.status_code not in (200, 201, 202):
+                print(f"  [ONOS] Error creando meter: HTTP {resp.status_code} "
+                      f"{resp.text[:300]}")
+                return None
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {}
+            for key in ("id", "meterId"):
+                if data.get(key) is not None:
+                    return str(data[key])
+            location = resp.headers.get("Location", "")
+            if location:
+                return location.rstrip("/").split("/")[-1]
+            meters = self.get_meters(device_id)
+            candidates = [
+                meter for meter in meters
+                if str(meter.get("unit")) == "PKTS_PER_SEC"
+                and any(
+                    int(band.get("rate", -1)) == rate_pps
+                    for band in meter.get("bands", [])
+                )
+            ]
+            if candidates:
+                return str(candidates[-1].get("id") or candidates[-1].get("meterId"))
+            print("  [ONOS] Meter creado, pero no se pudo resolver meter_id")
+            return None
+        except Exception as exc:
+            print(f"  [ONOS] Error creando meter: {exc}")
+            return None
+
+    def eliminar_meter(self, device_id, meter_id):
+        if not meter_id:
+            return True
+        if not (
+            Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_WRITES_ENABLED
+        ):
+            print(f"  [ONOS] SIMULATED delete meter {meter_id} from {device_id}")
+            return True
+        try:
+            resp = requests.delete(
+                f"{self.url}/onos/v1/meters/{device_id}/{meter_id}",
+                auth=self.auth,
+                timeout=5,
+            )
+            if resp.status_code in (200, 202, 204, 404):
+                return True
+            print(f"  [ONOS] Error eliminando meter {meter_id}: "
+                  f"HTTP {resp.status_code} {resp.text[:200]}")
+            return False
+        except Exception as exc:
+            print(f"  [ONOS] Error eliminando meter {meter_id}: {exc}")
+            return False
+
+    def get_meters(self, device_id):
+        if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
+            return []
+        try:
+            resp = requests.get(
+                f"{self.url}/onos/v1/meters/{device_id}",
+                auth=self.auth,
+                timeout=4,
+            )
+            if resp.status_code == 200:
+                return resp.json().get("meters", [])
+            print(f"  [ONOS] Error GET /meters/{device_id}: HTTP {resp.status_code}")
+        except Exception as exc:
+            print(f"  [ONOS] Error GET /meters/{device_id}: {exc}")
+        return []
+
     def get_flows(self, device_id):
         """Devuelve flows crudas de un device ONOS."""
         if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
@@ -1252,10 +1539,14 @@ class M6Translator:
         self.portal_ips = {}        # {mac: ip_asignada}
         self.flows_t0_shared = {}   # {policy_key: (device_id, flow_id, expires_at)}
         self.session_gates = {}     # {mac: (device_id, flow_id, expires_at)}
+        self.path_records = {}      # {mac: {perm_key: path metadata}}
         self.pipeline_fallback_flows = {}  # {device_id: [(device_id, flow_id), ...]}
         self.mitigaciones = {}
+        self.rate_limits = {}
         self._security_windows = defaultdict(deque)
         self._packet_in_seen = {}
+        self._failover_recovery_seen = {}
+        self._failover_event_seen = {}
 
     def _flow_debug(self, flow_entry):
         selector = flow_entry.get("selector", {}).get("criteria", [])
@@ -1279,6 +1570,37 @@ class M6Translator:
         )
         print(f"      selector={detail['selector']}")
         print(f"      treatment={detail['treatment']}")
+
+    @staticmethod
+    def _path_to_dicts(path):
+        return [
+            {
+                "device_id": dev,
+                "in_port": None if inp is None else int(inp),
+                "out_port": int(out),
+            }
+            for dev, inp, out in (path or [])
+        ]
+
+    def _registrar_path_sesion(self, mac, *, src_ip, dst_ip, tcp_port,
+                               vlan_id, target_table, ida, retorno):
+        """Guarda el último path instalado por permiso; no crece por paquete."""
+        mac_key = (mac or "").lower()
+        if not mac_key:
+            return
+        perm_key = f"{str(target_table).upper()}:{dst_ip}:{int(tcp_port)}"
+        record = {
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "tcp_port": int(tcp_port),
+            "vlan_id": int(vlan_id),
+            "target_table": str(target_table).upper(),
+            "ida": self._path_to_dicts(ida),
+            "retorno": self._path_to_dicts(retorno),
+            "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        with self._lock:
+            self.path_records.setdefault(mac_key, {})[perm_key] = record
 
     @staticmethod
     def _normalizar_eth_type(value):
@@ -1336,7 +1658,26 @@ class M6Translator:
             return False
         return str(actual_in.get("port")) == str(esperado_in.get("port"))
 
-    def _monitoring_gre_specs(self):
+    def _flow_es_monitoring_gre(self, flow):
+        if int(flow.get("tableId", -1)) != 0:
+            return False
+        if int(flow.get("priority", -1)) != Config.PRIO_T0_MONITORING_GRE:
+            return False
+        criteria = self._criterios_por_tipo(flow)
+        try:
+            return (
+                self._normalizar_eth_type(
+                    criteria.get("ETH_TYPE", {}).get("ethType")
+                ) == 0x0800
+                and int(criteria.get("IP_PROTO", {}).get("protocol")) == 47
+                and criteria.get("IPV4_DST", {}).get("ip")
+                == f"{Config.MONITORING_GRE_DST}/32"
+                and self._output_port(flow) is not None
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def _monitoring_gre_base_specs(self):
         specs = []
         for item in Config.MONITORING_GRE_FLOWS:
             flow = self.builder.t0_monitoring_gre_flow(
@@ -1348,7 +1689,181 @@ class M6Translator:
             specs.append({**item, "flow": flow})
         return specs
 
-    def estado_monitoring_gre(self):
+    def _monitoring_gre_static_afectado(self, failed_devices, failed_links):
+        failed_devices = {str(d) for d in (failed_devices or []) if d}
+        endpoints = self._failed_link_endpoints(failed_links)
+        for spec in self._monitoring_gre_base_specs():
+            device_id = str(spec["device_id"])
+            if device_id in failed_devices:
+                return True
+            in_port = spec.get("in_port")
+            out_port = spec.get("out_port")
+            if in_port is not None and (device_id, str(in_port)) in endpoints:
+                return True
+            if out_port is not None and (device_id, str(out_port)) in endpoints:
+                return True
+        return False
+
+    def _monitoring_gre_dynamic_specs(self, failed_devices=None,
+                                      failed_links=None):
+        failed_devices = {str(d) for d in (failed_devices or []) if d}
+        failed_links = self._normalizar_failed_links(failed_links or [])
+        source = Config.MONITORING_GRE_SOURCE_DEVICE
+        egress = Config.MONITORING_GRE_EGRESS_DEVICE
+        egress_port = Config.MONITORING_GRE_EGRESS_PORT
+        if source in failed_devices or egress in failed_devices:
+            return {
+                "mode": "dynamic_path",
+                "recoverable": False,
+                "reason": "source_or_egress_device_failed",
+                "route": [],
+                "specs": [],
+            }
+
+        links = self.onos.get_links()
+        if source == egress:
+            route = [(source, None, egress_port)]
+        else:
+            failed_endpoints = self._failed_link_endpoints(failed_links)
+            adjacency = defaultdict(list)
+            link_by_pair = {}
+            for link in links:
+                if link.get("state") not in (None, "ACTIVE"):
+                    continue
+                src = link.get("src", {})
+                dst = link.get("dst", {})
+                src_dev, dst_dev = src.get("device"), dst.get("device")
+                src_p, dst_p = src.get("port"), dst.get("port")
+                if not (src_dev and dst_dev and str(src_p).isdigit()
+                        and str(dst_p).isdigit()):
+                    continue
+                if src_dev in failed_devices or dst_dev in failed_devices:
+                    continue
+                if (str(src_dev), str(src_p)) in failed_endpoints:
+                    continue
+                if (str(dst_dev), str(dst_p)) in failed_endpoints:
+                    continue
+                adjacency[src_dev].append(dst_dev)
+                link_by_pair.setdefault(
+                    (src_dev, dst_dev), (int(src_p), int(dst_p))
+                )
+
+            queue = deque([(source, [source])])
+            visited = {source}
+            path = None
+            while queue:
+                current, current_path = queue.popleft()
+                for neighbor in sorted(adjacency.get(current, [])):
+                    if neighbor in visited:
+                        continue
+                    next_path = current_path + [neighbor]
+                    if neighbor == egress:
+                        path = next_path
+                        queue.clear()
+                        break
+                    visited.add(neighbor)
+                    queue.append((neighbor, next_path))
+
+            if not path:
+                return {
+                    "mode": "dynamic_path",
+                    "recoverable": False,
+                    "reason": "no_path_to_monitoring_egress",
+                    "route": [],
+                    "specs": [],
+                }
+
+            route = []
+            in_port = None
+            for current, nxt in zip(path, path[1:]):
+                link_ports = link_by_pair.get((current, nxt))
+                if not link_ports:
+                    return {
+                        "mode": "dynamic_path",
+                        "recoverable": False,
+                        "reason": "incomplete_link_path",
+                        "route": [],
+                        "specs": [],
+                    }
+                out_port, next_in_port = link_ports
+                route.append((current, in_port, out_port))
+                in_port = next_in_port
+            route.append((egress, in_port, egress_port))
+
+        specs = []
+        for index, (device_id, in_port, out_port) in enumerate(route, start=1):
+            flow = self.builder.t0_monitoring_gre_flow(
+                device_id,
+                out_port,
+                dst_ip=Config.MONITORING_GRE_DST,
+                in_port=in_port,
+            )
+            specs.append({
+                "name": (
+                    f"gre_dynamic_hop_{index}_"
+                    f"{Config.SWITCH_NOMBRES.get(device_id, device_id[-4:])}"
+                ),
+                "device_id": device_id,
+                "in_port": in_port,
+                "out_port": out_port,
+                "flow": flow,
+            })
+        return {
+            "mode": "dynamic_path",
+            "recoverable": True,
+            "reason": None,
+            "route": self._path_to_dicts(route),
+            "specs": specs,
+        }
+
+    def _monitoring_gre_plan(self, failed_devices=None, failed_links=None):
+        failed_links = self._normalizar_failed_links(failed_links or [])
+        failed_devices = {str(d) for d in (failed_devices or []) if d}
+        if not self._monitoring_gre_static_afectado(failed_devices, failed_links):
+            specs = self._monitoring_gre_base_specs()
+            route = [
+                (spec["device_id"], spec.get("in_port"), spec["out_port"])
+                for spec in specs
+            ]
+            return {
+                "mode": "static_base",
+                "recoverable": True,
+                "reason": None,
+                "route": self._path_to_dicts(route),
+                "specs": specs,
+            }
+        return self._monitoring_gre_dynamic_specs(
+            failed_devices=failed_devices,
+            failed_links=failed_links,
+        )
+
+    def _limpiar_monitoring_gre_conflictivos(self, specs):
+        if not specs:
+            return {"removed": [], "failed": []}
+        desired_by_device = defaultdict(list)
+        for spec in specs:
+            desired_by_device[spec["device_id"]].append(spec["flow"])
+
+        removed, failed = [], []
+        for device_id, desired in desired_by_device.items():
+            for flow in self.onos.get_flows(device_id):
+                if not self._flow_es_monitoring_gre(flow):
+                    continue
+                if any(
+                    self._flow_equivale_monitoring_gre(flow, expected)
+                    for expected in desired
+                ):
+                    continue
+                flow_id = flow.get("id")
+                if not flow_id:
+                    continue
+                if self.onos.eliminar_flow(device_id, flow_id):
+                    removed.append({"device_id": device_id, "flow_id": flow_id})
+                else:
+                    failed.append({"device_id": device_id, "flow_id": flow_id})
+        return {"removed": removed, "failed": failed}
+
+    def estado_monitoring_gre(self, failed_devices=None, failed_links=None):
         if not Config.MONITORING_GRE_ENABLED:
             return {"ok": True, "disabled": True, "flows": []}
         if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
@@ -1360,9 +1875,13 @@ class M6Translator:
                 "flows": [],
             }
 
+        plan = self._monitoring_gre_plan(
+            failed_devices=failed_devices,
+            failed_links=failed_links,
+        )
         flows_por_device = {}
         resultados = []
-        for spec in self._monitoring_gre_specs():
+        for spec in plan["specs"]:
             device_id = spec["device_id"]
             flows_por_device.setdefault(device_id, self.onos.get_flows(device_id))
             match = next(
@@ -1382,9 +1901,21 @@ class M6Translator:
                 "out_port": spec["out_port"],
                 "dst_ip": f"{Config.MONITORING_GRE_DST}/32",
             })
-        return {"ok": True, "flows": resultados}
+        return {
+            "ok": True,
+            "mode": plan["mode"],
+            "recoverable": plan["recoverable"],
+            "reason": plan.get("reason"),
+            "dst_ip": f"{Config.MONITORING_GRE_DST}/32",
+            "source_device": Config.MONITORING_GRE_SOURCE_DEVICE,
+            "egress_device": Config.MONITORING_GRE_EGRESS_DEVICE,
+            "egress_port": Config.MONITORING_GRE_EGRESS_PORT,
+            "route": plan["route"],
+            "flows": resultados,
+        }
 
-    def asegurar_monitoring_gre(self):
+    def asegurar_monitoring_gre(self, failed_devices=None, failed_links=None,
+                                cleanup_conflicts=False):
         if not Config.MONITORING_GRE_ENABLED:
             return {
                 "ok": True,
@@ -1409,9 +1940,30 @@ class M6Translator:
                 "failed": [],
             }
 
+        plan = self._monitoring_gre_plan(
+            failed_devices=failed_devices,
+            failed_links=failed_links,
+        )
+        if not plan["recoverable"]:
+            return {
+                "ok": True,
+                "checked": True,
+                "recoverable": False,
+                "mode": plan["mode"],
+                "reason": plan.get("reason"),
+                "installed": [],
+                "already_present": [],
+                "removed_conflicts": [],
+                "failed": [],
+            }
+
         flows_por_device = {}
+        cleanup = (
+            self._limpiar_monitoring_gre_conflictivos(plan["specs"])
+            if cleanup_conflicts else {"removed": [], "failed": []}
+        )
         installed, already_present, failed = [], [], []
-        for spec in self._monitoring_gre_specs():
+        for spec in plan["specs"]:
             device_id = spec["device_id"]
             flows_por_device.setdefault(device_id, self.onos.get_flows(device_id))
             existe = any(
@@ -1429,10 +1981,15 @@ class M6Translator:
             else:
                 failed.append(spec["name"])
         return {
-            "ok": not failed,
+            "ok": not (failed or cleanup["failed"]),
+            "checked": True,
+            "recoverable": True,
+            "mode": plan["mode"],
+            "route": plan["route"],
             "installed": installed,
             "already_present": already_present,
-            "failed": failed,
+            "removed_conflicts": cleanup["removed"],
+            "failed": failed + cleanup["failed"],
         }
 
     def _instalar_y_cachear(self, device_id, flow_entry, mac=None):
@@ -1773,6 +2330,18 @@ class M6Translator:
             if fid:
                 instalados += 1
 
+        if instalados:
+            self._registrar_path_sesion(
+                mac_sesion,
+                src_ip=src_ip,
+                dst_ip=dst_ip,
+                tcp_port=tcp_port,
+                vlan_id=vlan_id,
+                target_table=target_label,
+                ida=ida,
+                retorno=retorno,
+            )
+
         return instalados
 
     def _eliminar_flows_portal(self, mac):
@@ -1783,6 +2352,22 @@ class M6Translator:
         for device_id, flow_id in flows:
             self.onos.eliminar_flow(device_id, flow_id)
         return len(flows)
+
+    def _eliminar_flows_portal_compartidos(self):
+        prefixes = {"portal-edge-t1-dst", "portal-core-dst", "portal-core-src"}
+        with self._lock:
+            items = [
+                (key, self.flows_t0_shared.pop(key))
+                for key in list(self.flows_t0_shared)
+                if isinstance(key, tuple) and key and key[0] in prefixes
+            ]
+        for _key, value in items:
+            try:
+                device_id, flow_id = value[0], value[1]
+            except (IndexError, TypeError):
+                continue
+            self.onos.eliminar_flow(device_id, flow_id)
+        return len(items)
 
     def _asegurar_portal_ida_borde(self, host, portal_host, ttl=None):
         """Asegura la ida generica T1 host-edge -> portal."""
@@ -1906,6 +2491,9 @@ class M6Translator:
         Lee hosts ONOS y prepara acceso minimo al portal para clientes de datos.
         No abre recursos y excluye servidores/portal/DHCP.
         """
+        if force:
+            self._eliminar_flows_portal_compartidos()
+
         portal = self.onos.get_host_by_ip(Config.PORTAL_IP)
         if not portal:
             return {"ok": False, "error": "portal_no_aprendido_en_onos"}
@@ -2621,6 +3209,7 @@ class M6Translator:
         with self._lock:
             flows = self.flows_por_sesion.pop(mac, [])
             self.session_gates.pop(mac, None)
+            self.path_records.pop(mac, None)
         print(f"\n[M6] Cerrando sesión MAC={mac} — {len(flows)} flows")
         with obs.span("flow.elimination"):
             for device_id, flow_id in flows:
@@ -2793,6 +3382,876 @@ class M6Translator:
             "failed": failed,
         }
 
+    def _sesiones_activas_db_detalle(self):
+        """Devuelve sesiones activas con usuario/rol para análisis de failover."""
+        if not (Config.MYSQL_SECURITY_READS_ENABLED and MYSQL_OK):
+            return []
+        try:
+            conn = mysql.connector.connect(
+                host=Config.MYSQL_HOST,
+                user=Config.MYSQL_USER,
+                password=Config.MYSQL_PASS,
+                database=Config.MYSQL_DB,
+                connection_timeout=3,
+            )
+            cur = conn.cursor(dictionary=True)
+            cur.execute(
+                """
+                SELECT s.*, u.codigo_pucp
+                FROM sesiones_activas s
+                LEFT JOIN usuarios u ON u.id_usuario=s.id_usuario
+                WHERE s.estado='ACTIVA'
+                ORDER BY s.login_timestamp DESC
+                """
+            )
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return rows
+        except Exception as exc:
+            print(f"[M6] Error leyendo sesiones activas para failover: {exc}")
+            return []
+
+    @staticmethod
+    def _normalizar_failed_links(raw_links):
+        normalized = []
+        for link in raw_links or []:
+            if not isinstance(link, dict):
+                continue
+            if "src" in link and "dst" in link:
+                src = link.get("src") or {}
+                dst = link.get("dst") or {}
+            else:
+                src = {
+                    "device": link.get("src_device"),
+                    "port": link.get("src_port"),
+                }
+                dst = {
+                    "device": link.get("dst_device"),
+                    "port": link.get("dst_port"),
+                }
+            if not (src.get("device") and src.get("port")
+                    and dst.get("device") and dst.get("port")):
+                continue
+            normalized.append({
+                "src": {
+                    "device": str(src["device"]),
+                    "port": str(src["port"]),
+                },
+                "dst": {
+                    "device": str(dst["device"]),
+                    "port": str(dst["port"]),
+                },
+            })
+        return normalized
+
+    @staticmethod
+    def _failed_link_endpoints(failed_links):
+        endpoints = set()
+        for link in failed_links or []:
+            for side in ("src", "dst"):
+                ep = link.get(side, {})
+                dev, port = ep.get("device"), ep.get("port")
+                if dev and port is not None:
+                    endpoints.add((str(dev), str(port)))
+        return endpoints
+
+    @staticmethod
+    def _record_path_to_steps(path):
+        steps = []
+        for step in path or []:
+            if isinstance(step, dict):
+                dev = step.get("device_id")
+                in_port = step.get("in_port")
+                out_port = step.get("out_port")
+            else:
+                try:
+                    dev, in_port, out_port = step
+                except (TypeError, ValueError):
+                    continue
+            if dev is None or in_port is None or out_port is None:
+                continue
+            steps.append((str(dev), int(in_port), int(out_port)))
+        return steps
+
+    def _path_record_para_permiso(self, mac, dst_ip, tcp_port, target_table):
+        mac_key = (mac or "").lower()
+        perm_key = f"{str(target_table).upper()}:{dst_ip}:{int(tcp_port)}"
+        with self._lock:
+            record = self.path_records.get(mac_key, {}).get(perm_key)
+            if record:
+                return dict(record)
+        return None
+
+    def _path_usa_falla(self, path, failed_devices, failed_links):
+        failed_devices = {str(d) for d in (failed_devices or []) if d}
+        endpoints = self._failed_link_endpoints(failed_links)
+        for dev, in_port, out_port in self._record_path_to_steps(path):
+            if str(dev) in failed_devices:
+                return True
+            if (str(dev), str(in_port)) in endpoints:
+                return True
+            if (str(dev), str(out_port)) in endpoints:
+                return True
+        return False
+
+    @staticmethod
+    def _flow_usa_ip_academica(flow):
+        academic_ips = {Config.SERVER_CURSOS, Config.SERVER_NOTAS}
+        for criterion in flow.get("selector", {}).get("criteria", []):
+            ip = criterion.get("ip")
+            if ip and str(ip).split("/")[0] in academic_ips:
+                return True
+        return False
+
+    @staticmethod
+    def _flow_usa_endpoint(flow, device_id, failed_ports):
+        failed_ports = {str(p) for p in failed_ports}
+        for criterion in flow.get("selector", {}).get("criteria", []):
+            if criterion.get("type") == "IN_PORT":
+                if str(criterion.get("port")) in failed_ports:
+                    return True
+        for instruction in flow.get("treatment", {}).get("instructions", []):
+            if instruction.get("type") == "OUTPUT":
+                if str(instruction.get("port")) in failed_ports:
+                    return True
+        return False
+
+    @staticmethod
+    def _shared_key_usa_falla(key, failed_devices, failed_links):
+        failed_devices = {str(d) for d in (failed_devices or []) if d}
+        endpoints = M6Translator._failed_link_endpoints(failed_links)
+        if not isinstance(key, tuple) or len(key) < 2:
+            return False
+
+        prefix = key[0]
+        try:
+            if prefix in {
+                "fwd-core-server", "ret-core-server",
+                "portal-core-dst", "portal-core-src",
+            }:
+                device_id = str(key[1])
+                in_port, out_port = str(key[2]), str(key[3])
+                return (
+                    device_id in failed_devices
+                    or (device_id, in_port) in endpoints
+                    or (device_id, out_port) in endpoints
+                )
+            if prefix == "t2-edge-fwd-vlan-dst":
+                device_id = str(key[1])
+                out_port = str(key[5])
+                return (
+                    device_id in failed_devices
+                    or (device_id, out_port) in endpoints
+                )
+            if prefix == "portal-edge-t1-dst":
+                device_id = str(key[1])
+                out_port = str(key[2])
+                return (
+                    device_id in failed_devices
+                    or (device_id, out_port) in endpoints
+                )
+        except (IndexError, TypeError, ValueError):
+            return False
+        return False
+
+    def _limpiar_flows_compartidos_por_falla(self, failed_devices, failed_links):
+        """
+        Limpia solo flows de datos compartidos que usan el switch/puerto caido.
+        No toca ARP/DHCP/LLDP/BDDP, GRE ni OUTPUT:NORMAL. La busqueda por ONOS
+        es acotada a los endpoints de la falla y a IPs academicas.
+        """
+        failed_devices = {str(d) for d in (failed_devices or []) if d}
+        endpoints = self._failed_link_endpoints(failed_links)
+        removed, failed = [], []
+
+        with self._lock:
+            stale_keys = [
+                key for key in self.flows_t0_shared
+                if self._shared_key_usa_falla(key, failed_devices, failed_links)
+            ]
+            stale_flows = [
+                (key, self.flows_t0_shared.pop(key))
+                for key in stale_keys
+            ]
+
+        for key, (device_id, flow_id, _expires_at) in stale_flows:
+            if device_id in failed_devices:
+                failed.append({
+                    "device_id": device_id,
+                    "flow_id": flow_id,
+                    "reason": "device_unavailable",
+                    "cache_key": str(key),
+                })
+                continue
+            if self.onos.eliminar_flow(device_id, flow_id):
+                removed.append({
+                    "device_id": device_id,
+                    "flow_id": flow_id,
+                    "source": "shared_cache",
+                    "cache_key": str(key),
+                })
+            else:
+                failed.append({
+                    "device_id": device_id,
+                    "flow_id": flow_id,
+                    "source": "shared_cache",
+                    "cache_key": str(key),
+                })
+
+        ports_by_device = defaultdict(set)
+        for device_id, port in endpoints:
+            if device_id not in failed_devices:
+                ports_by_device[device_id].add(str(port))
+
+        for device_id, ports in ports_by_device.items():
+            for flow in self.onos.get_flows(device_id):
+                if flow.get("appId") != "org.onosproject.rest":
+                    continue
+                if not self._flow_usa_ip_academica(flow):
+                    continue
+                if not self._flow_usa_endpoint(flow, device_id, ports):
+                    continue
+                flow_id = flow.get("id")
+                if not flow_id:
+                    continue
+                if self.onos.eliminar_flow(device_id, flow_id):
+                    removed.append({
+                        "device_id": device_id,
+                        "flow_id": flow_id,
+                        "source": "onos_endpoint_scan",
+                    })
+                else:
+                    failed.append({
+                        "device_id": device_id,
+                        "flow_id": flow_id,
+                        "source": "onos_endpoint_scan",
+                    })
+
+        if removed or failed:
+            print(
+                f"[M6] Failover cleanup shared flows: "
+                f"removed={len(removed)} failed={len(failed)}"
+            )
+        return {"removed": removed, "failed": failed}
+
+    def _topology_snapshot(self):
+        devices_raw = self.onos.get_devices_raw()
+        links = self.onos.get_links()
+        hosts = self.onos.get_hosts()
+        available = [
+            d.get("id") for d in devices_raw
+            if d.get("available") is True
+        ]
+        unavailable = [
+            d.get("id") for d in devices_raw
+            if d.get("available") is not True
+        ]
+        return {
+            "ok": True,
+            "devices": devices_raw,
+            "available_devices": available,
+            "unavailable_devices": unavailable,
+            "links": links,
+            "links_count": len(links),
+            "hosts_count": len(hosts),
+            "onos_reads_enabled": Config.ONOS_READS_ENABLED,
+            "failover_analysis_enabled": Config.FAILOVER_ANALYSIS_ENABLED,
+            "failover_auto_reinstall_enabled": (
+                Config.FAILOVER_AUTO_REINSTALL_ENABLED
+            ),
+        }
+
+    def estado_failover_topologia(self):
+        if not Config.FAILOVER_ANALYSIS_ENABLED:
+            return {
+                "ok": True,
+                "disabled": True,
+                "reason": "failover_analysis_disabled",
+            }
+        return self._topology_snapshot()
+
+    def _politicas_para_sesion_failover(self, session):
+        payload_opa = {
+            "input": {
+                "codigo_pucp": session.get("codigo_pucp") or "",
+                "rol": session.get("nombre_rol") or "",
+                "ip_asignada": session.get("ip_asignada"),
+                "vlan_id": session.get("vlan_id"),
+                "mac_address": session.get("mac_address"),
+                "switch_dpid": session.get("switch_dpid"),
+            }
+        }
+        return self.policies.get_policies(payload_opa)
+
+    def analizar_failover(self, data):
+        """
+        Analiza impacto de caídas simuladas. No borra ni instala flows.
+        Body:
+          {
+            "failed_devices": ["of:..."],
+            "failed_links": [
+              {"src_device":"of:...","src_port":1,
+               "dst_device":"of:...","dst_port":2}
+            ]
+          }
+        """
+        if not Config.FAILOVER_ANALYSIS_ENABLED:
+            return {
+                "ok": True,
+                "disabled": True,
+                "reason": "failover_analysis_disabled",
+            }
+        failed_devices = {
+            str(d) for d in (data.get("failed_devices") or []) if d
+        }
+        failed_links = self._normalizar_failed_links(
+            data.get("failed_links") or []
+        )
+        links = self.onos.get_links()
+        sessions = self._sesiones_activas_db_detalle()
+        impacted = []
+        unaffected = 0
+        recoverable = 0
+        unavailable = 0
+
+        for session in sessions:
+            src_host = {
+                "mac": session.get("mac_address"),
+                "switch_dpid": session.get("switch_dpid"),
+                "in_port": int(session.get("in_port") or 0),
+            }
+            if not src_host["switch_dpid"] or not src_host["in_port"]:
+                impacted.append({
+                    "session_id": session.get("id_sesion"),
+                    "ip": session.get("ip_asignada"),
+                    "mac": session.get("mac_address"),
+                    "status": "invalid_session_binding",
+                    "recoverable": False,
+                })
+                unavailable += 1
+                continue
+
+            politicas = self._politicas_para_sesion_failover(session)
+            session_items = []
+            session_recoverable = True
+            session_impacted = False
+            for permiso in politicas.get("permisos", []):
+                dst_ip = permiso.get("ip_dst")
+                tabla_permiso = str(permiso.get("tabla") or "T2").upper()
+                if tabla_permiso not in ("T2", "T3"):
+                    tabla_permiso = "T2"
+                dst_host = self.onos.get_host_by_ip(dst_ip)
+                if not dst_host:
+                    session_items.append({
+                        "dst_ip": dst_ip,
+                        "status": "destination_not_learned",
+                        "recoverable": False,
+                    })
+                    session_impacted = True
+                    session_recoverable = False
+                    continue
+
+                for tcp_port in permiso.get("puertos") or []:
+                    stored = self._path_record_para_permiso(
+                        session.get("mac_address"), dst_ip, tcp_port,
+                        tabla_permiso
+                    )
+                    if stored:
+                        ida = self._record_path_to_steps(stored.get("ida"))
+                        retorno = self._record_path_to_steps(
+                            stored.get("retorno")
+                        )
+                    else:
+                        ida = self.onos.calcular_pasos(
+                            src_host["switch_dpid"], src_host["in_port"],
+                            dst_host["switch_dpid"], dst_host["in_port"]
+                        )
+                        retorno = self.onos.calcular_pasos(
+                            dst_host["switch_dpid"], dst_host["in_port"],
+                            src_host["switch_dpid"], src_host["in_port"]
+                        )
+                    affected = (
+                        self._path_usa_falla(ida, failed_devices, failed_links)
+                        or self._path_usa_falla(
+                            retorno, failed_devices, failed_links
+                        )
+                    )
+                    alt_ida = self.onos.calcular_pasos_con_fallas(
+                        src_host["switch_dpid"], src_host["in_port"],
+                        dst_host["switch_dpid"], dst_host["in_port"],
+                        links, failed_devices, failed_links
+                    )
+                    alt_retorno = self.onos.calcular_pasos_con_fallas(
+                        dst_host["switch_dpid"], dst_host["in_port"],
+                        src_host["switch_dpid"], src_host["in_port"],
+                        links, failed_devices, failed_links
+                    )
+                    item_recoverable = bool(alt_ida and alt_retorno)
+                    status = "unaffected"
+                    if affected:
+                        session_impacted = True
+                        status = "recoverable" if item_recoverable else "unavailable"
+                    if affected and not item_recoverable:
+                        session_recoverable = False
+                    session_items.append({
+                        "dst_ip": dst_ip,
+                        "tcp_port": int(tcp_port),
+                        "table": tabla_permiso,
+                        "status": status,
+                        "recoverable": item_recoverable,
+                        "path_source": "installed_record" if stored else "onos_current",
+                        "current_ida": self._path_to_dicts(ida),
+                        "current_retorno": self._path_to_dicts(retorno),
+                        "alternative_ida": self._path_to_dicts(alt_ida),
+                        "alternative_retorno": self._path_to_dicts(alt_retorno),
+                    })
+
+            if not session_impacted:
+                unaffected += 1
+                continue
+            if session_recoverable:
+                recoverable += 1
+            else:
+                unavailable += 1
+            impacted.append({
+                "session_id": session.get("id_sesion"),
+                "codigo_pucp": session.get("codigo_pucp"),
+                "role": session.get("nombre_rol"),
+                "ip": session.get("ip_asignada"),
+                "mac": session.get("mac_address"),
+                "switch_dpid": session.get("switch_dpid"),
+                "in_port": session.get("in_port"),
+                "recoverable": session_recoverable,
+                "permissions": session_items,
+            })
+
+        return {
+            "ok": True,
+            "dry_run": True,
+            "auto_reinstall_enabled": Config.FAILOVER_AUTO_REINSTALL_ENABLED,
+            "failed_devices": sorted(failed_devices),
+            "failed_links": failed_links,
+            "gre": self.estado_monitoring_gre(
+                failed_devices=failed_devices,
+                failed_links=failed_links,
+            ),
+            "sessions_total": len(sessions),
+            "summary": {
+                "unaffected_sessions": unaffected,
+                "impacted_sessions": len(impacted),
+                "recoverable_sessions": recoverable,
+                "unavailable_sessions": unavailable,
+            },
+            "impacted": impacted,
+            "note": (
+                "Este endpoint no instala ni elimina flows. Sirve para validar "
+                "failover antes de activar reinstalacion automatica."
+            ),
+        }
+
+    def _permiso_ya_estaba_activo(self, mac, dst_ip, tcp_port, target_table):
+        mac_key = (mac or "").lower()
+        perm_key = f"{str(target_table).upper()}:{dst_ip}:{int(tcp_port)}"
+        with self._lock:
+            return perm_key in self.path_records.get(mac_key, {})
+
+    def _plan_reinstalacion_sesion(self, session):
+        mac = (session.get("mac_address") or "").lower()
+        src_ip = session.get("ip_asignada")
+        switch_dpid = session.get("switch_dpid")
+        in_port = int(session.get("in_port") or 0)
+        vlan_id = int(session.get("vlan_id") or 0)
+        if not (mac and src_ip and switch_dpid and in_port and vlan_id):
+            return {
+                "ok": False,
+                "reason": "invalid_session_binding",
+                "session_id": session.get("id_sesion"),
+                "ip": src_ip,
+                "mac": mac,
+            }
+
+        politicas = self._politicas_para_sesion_failover(session)
+        permisos = []
+        for permiso in politicas.get("permisos", []):
+            dst_ip = permiso.get("ip_dst")
+            tabla_permiso = str(permiso.get("tabla") or "T2").upper()
+            if tabla_permiso not in ("T2", "T3"):
+                tabla_permiso = "T2"
+            for tcp_port in permiso.get("puertos") or []:
+                if tabla_permiso == "T3" and not self._permiso_ya_estaba_activo(
+                    mac, dst_ip, tcp_port, tabla_permiso
+                ):
+                    continue
+                permisos.append({
+                    "dst_ip": dst_ip,
+                    "tcp_port": int(tcp_port),
+                    "table": tabla_permiso,
+                    "expires_at": permiso.get("expires_at"),
+                })
+
+        return {
+            "ok": True,
+            "session_id": session.get("id_sesion"),
+            "codigo_pucp": session.get("codigo_pucp"),
+            "role": session.get("nombre_rol"),
+            "ip": src_ip,
+            "mac": mac,
+            "switch_dpid": switch_dpid,
+            "in_port": in_port,
+            "vlan_id": vlan_id,
+            "permissions": permisos,
+        }
+
+    def _limpiar_flows_sesion_para_recovery(self, mac):
+        mac_key = (mac or "").lower()
+        with self._lock:
+            flows = self.flows_por_sesion.pop(mac_key, [])
+            self.session_gates.pop(mac_key, None)
+            self.path_records.pop(mac_key, None)
+        removed, failed = [], []
+        for device_id, flow_id in flows:
+            if self.onos.eliminar_flow(device_id, flow_id):
+                removed.append({"device_id": device_id, "flow_id": flow_id})
+            else:
+                failed.append({"device_id": device_id, "flow_id": flow_id})
+        return removed, failed
+
+    def _cooldown_failover_recovery(self, mac):
+        cooldown = Config.FAILOVER_RECOVERY_COOLDOWN
+        if cooldown <= 0:
+            return False, 0
+        now = time.time()
+        mac_key = (mac or "").lower()
+        with self._lock:
+            last = self._failover_recovery_seen.get(mac_key)
+            stale = [
+                key for key, ts in self._failover_recovery_seen.items()
+                if now - ts > max(cooldown * 6, 60)
+            ]
+            for key in stale:
+                self._failover_recovery_seen.pop(key, None)
+            if last and now - last < cooldown:
+                return True, int(cooldown - (now - last))
+            self._failover_recovery_seen[mac_key] = now
+        return False, 0
+
+    def recuperar_failover(self, data):
+        """
+        Reinstala caminos de sesiones activas de forma controlada.
+        Por seguridad, apply=true solo trabaja contra la topologia real actual;
+        fallas simuladas se aceptan solo como dry-run con /analyze.
+        """
+        if not Config.FAILOVER_ANALYSIS_ENABLED:
+            return {
+                "ok": True,
+                "disabled": True,
+                "reason": "failover_analysis_disabled",
+            }
+
+        apply = bool(data.get("apply") is True)
+        failed_devices = data.get("failed_devices") or []
+        failed_links = data.get("failed_links") or []
+        cleanup_failed_devices = data.get("cleanup_failed_devices") or []
+        cleanup_failed_links = self._normalizar_failed_links(
+            data.get("cleanup_failed_links") or []
+        )
+        if failed_devices or failed_links:
+            analysis = self.analizar_failover(data)
+            analysis["recover_endpoint"] = "dry_run_only"
+            analysis["note"] = (
+                "Las fallas simuladas no se aplican. Para reinstalar flows, "
+                "ejecuta recover con apply=true sin failed_devices/failed_links, "
+                "despues de que ONOS ya vea la topologia real."
+            )
+            return analysis
+
+        if apply and not Config.FAILOVER_AUTO_REINSTALL_ENABLED:
+            return {
+                "ok": False,
+                "error": "failover_auto_reinstall_disabled",
+                "dry_run": False,
+                "applied": False,
+                "hint": (
+                    "Activa FAILOVER_AUTO_REINSTALL_ENABLED=true solo para "
+                    "una prueba controlada."
+                ),
+            }
+
+        sessions = self._sesiones_activas_db_detalle()
+        requested_ips = {
+            str(ip) for ip in (data.get("src_ips") or []) if ip
+        }
+        requested_macs = {
+            str(mac).lower() for mac in (data.get("macs") or []) if mac
+        }
+        if requested_ips or requested_macs:
+            sessions = [
+                s for s in sessions
+                if s.get("ip_asignada") in requested_ips
+                or (s.get("mac_address") or "").lower() in requested_macs
+            ]
+
+        limit = max(1, Config.FAILOVER_RECOVERY_MAX_SESSIONS)
+        limited = len(sessions) > limit
+        sessions = sessions[:limit]
+
+        cleanup_result = {"removed": [], "failed": []}
+        if apply and (cleanup_failed_devices or cleanup_failed_links):
+            cleanup_result = self._limpiar_flows_compartidos_por_falla(
+                cleanup_failed_devices,
+                cleanup_failed_links,
+            )
+        gre_result = (
+            self.asegurar_monitoring_gre(
+                failed_devices=cleanup_failed_devices,
+                failed_links=cleanup_failed_links,
+                cleanup_conflicts=apply,
+            )
+            if apply else
+            self.estado_monitoring_gre(
+                failed_devices=cleanup_failed_devices,
+                failed_links=cleanup_failed_links,
+            )
+        )
+
+        planned, reinstalled, skipped, failed = [], [], [], []
+        for session in sessions:
+            plan = self._plan_reinstalacion_sesion(session)
+            planned.append(plan)
+            if not apply:
+                continue
+            if not plan.get("ok"):
+                failed.append(plan)
+                continue
+            cooldown, retry_after = self._cooldown_failover_recovery(plan["mac"])
+            if cooldown:
+                skipped.append({
+                    "mac": plan["mac"],
+                    "ip": plan["ip"],
+                    "reason": "cooldown",
+                    "retry_after_seconds": retry_after,
+                })
+                continue
+
+            removed, remove_failed = self._limpiar_flows_sesion_para_recovery(
+                plan["mac"]
+            )
+            host_origen = {
+                "mac": plan["mac"],
+                "switch_dpid": plan["switch_dpid"],
+                "in_port": plan["in_port"],
+            }
+            self._asegurar_pipeline_fallback_en_borde(plan["switch_dpid"])
+            gate = self._instalar_session_gate(
+                plan["mac"], plan["switch_dpid"], plan["in_port"],
+                plan["vlan_id"], ip_src=plan["ip"]
+            )
+            installed = 1 if gate else 0
+            details = []
+            for permiso in plan["permissions"]:
+                dst_host = self.onos.get_host_by_ip(permiso["dst_ip"])
+                if not dst_host:
+                    details.append({
+                        **permiso,
+                        "installed": 0,
+                        "status": "destination_not_learned",
+                    })
+                    continue
+                count = self._instalar_camino_tcp(
+                    plan["mac"], host_origen, dst_host,
+                    plan["ip"], permiso["dst_ip"], permiso["tcp_port"],
+                    plan["vlan_id"], Config.DATA_FLOW_TIMEOUT,
+                    target_table=permiso["table"],
+                    expires_at=permiso.get("expires_at"),
+                )
+                installed += count
+                details.append({
+                    **permiso,
+                    "installed": count,
+                    "status": "ok" if count else "install_failed",
+                })
+
+            reinstalled.append({
+                "session_id": plan["session_id"],
+                "ip": plan["ip"],
+                "mac": plan["mac"],
+                "removed_flows": len(removed),
+                "remove_failed": remove_failed,
+                "installed_flows": installed,
+                "permissions": details,
+            })
+
+        return {
+            "ok": True,
+            "dry_run": not apply,
+            "applied": apply,
+            "auto_reinstall_enabled": Config.FAILOVER_AUTO_REINSTALL_ENABLED,
+            "sessions_seen": len(sessions),
+            "limited": limited,
+            "max_sessions": limit,
+            "cleanup": cleanup_result,
+            "gre": gre_result,
+            "planned": planned,
+            "reinstalled": reinstalled,
+            "skipped": skipped,
+            "failed": failed,
+            "note": (
+                "Sin apply=true no se instalan ni borran flows."
+                if not apply else
+                "Se reinstalaron solo flows registrados por sesion; no se "
+                "tocaron portal ni control; GRE se reaseguro solo si era "
+                "necesario por la topologia actual."
+            ),
+        }
+
+    def _failover_event_key(self, data, failed_devices, failed_links):
+        event_type = str(data.get("event_type") or data.get("type") or "unknown")
+        return (
+            event_type.lower(),
+            tuple(sorted(str(d) for d in failed_devices)),
+            tuple(
+                sorted(
+                    (
+                        str(link.get("src", {}).get("device")),
+                        str(link.get("src", {}).get("port")),
+                        str(link.get("dst", {}).get("device")),
+                        str(link.get("dst", {}).get("port")),
+                    )
+                    for link in failed_links
+                )
+            ),
+        )
+
+    def _failover_event_duplicado(self, key):
+        window = Config.FAILOVER_EVENT_DEDUP_WINDOW
+        if window <= 0:
+            return False, 0
+        now = time.time()
+        with self._lock:
+            last = self._failover_event_seen.get(key)
+            stale = [
+                item_key
+                for item_key, ts in self._failover_event_seen.items()
+                if now - ts > max(window * 4, 60)
+            ]
+            for item_key in stale:
+                self._failover_event_seen.pop(item_key, None)
+            if last and now - last < window:
+                return True, int(window - (now - last))
+            self._failover_event_seen[key] = now
+        return False, 0
+
+    def _failed_devices_desde_topologia(self):
+        try:
+            return [
+                d.get("id")
+                for d in self.onos.get_devices_raw()
+                if d.get("id") and d.get("available") is not True
+            ]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _ips_recuperables_desde_analisis(analysis):
+        ips = []
+        for item in analysis.get("impacted") or []:
+            if item.get("recoverable") and item.get("ip"):
+                ips.append(item["ip"])
+        return sorted(set(ips))
+
+    def procesar_failover_event(self, data):
+        """
+        Entrada para eventos reales de topologia. No hace polling ni crea hilos.
+        Si auto-reinstall esta apagado, solo analiza. Si esta encendido, aplica
+        recovery a las sesiones recuperables calculadas por el analisis.
+        """
+        if not Config.FAILOVER_ANALYSIS_ENABLED:
+            return {
+                "ok": True,
+                "disabled": True,
+                "reason": "failover_analysis_disabled",
+            }
+
+        event_type = str(data.get("event_type") or data.get("type") or "").lower()
+        failed_devices = {
+            str(d) for d in (data.get("failed_devices") or []) if d
+        }
+        device_id = data.get("device_id") or data.get("device")
+        if device_id and event_type in {"device_down", "device_removed", "device_unavailable"}:
+            failed_devices.add(str(device_id))
+        if not failed_devices and event_type in {"device_down", "device_removed", "device_unavailable", "topology_change"}:
+            failed_devices.update(
+                str(d) for d in self._failed_devices_desde_topologia() if d
+            )
+        failed_links = self._normalizar_failed_links(
+            data.get("failed_links") or []
+        )
+
+        event_key = self._failover_event_key(data, failed_devices, failed_links)
+        duplicate, retry_after = self._failover_event_duplicado(event_key)
+        if duplicate:
+            return {
+                "ok": True,
+                "duplicate": True,
+                "retry_after_seconds": retry_after,
+                "applied": False,
+                "auto_reinstall_enabled": Config.FAILOVER_AUTO_REINSTALL_ENABLED,
+            }
+
+        analysis_payload = {
+            "failed_devices": sorted(failed_devices),
+            "failed_links": failed_links,
+        }
+        analysis = self.analizar_failover(analysis_payload)
+        recoverable_ips = self._ips_recuperables_desde_analisis(analysis)
+        gre_result = (
+            self.asegurar_monitoring_gre(
+                failed_devices=sorted(failed_devices),
+                failed_links=failed_links,
+                cleanup_conflicts=True,
+            )
+            if Config.FAILOVER_AUTO_REINSTALL_ENABLED else
+            analysis.get("gre")
+        )
+        result = {
+            "ok": bool(analysis.get("ok")),
+            "event_type": event_type or "unknown",
+            "failed_devices": sorted(failed_devices),
+            "failed_links": failed_links,
+            "auto_reinstall_enabled": Config.FAILOVER_AUTO_REINSTALL_ENABLED,
+            "recoverable_ips": recoverable_ips,
+            "gre": gre_result,
+            "analysis": analysis,
+            "applied": False,
+        }
+
+        if not Config.FAILOVER_AUTO_REINSTALL_ENABLED:
+            result["reason"] = "auto_reinstall_disabled"
+            return result
+        if not recoverable_ips:
+            result["reason"] = "no_recoverable_sessions"
+            result["applied"] = bool(
+                (gre_result or {}).get("installed")
+                or (gre_result or {}).get("removed_conflicts")
+            )
+            return result
+
+        recovery = self.recuperar_failover({
+            "apply": True,
+            "src_ips": recoverable_ips,
+            "cleanup_failed_devices": sorted(failed_devices),
+            "cleanup_failed_links": failed_links,
+        })
+        result["recovery"] = recovery
+        result["applied"] = bool(
+            recovery.get("applied")
+            or (gre_result or {}).get("installed")
+            or (gre_result or {}).get("removed_conflicts")
+        )
+        result["ok"] = bool(recovery.get("ok"))
+        return result
+
     # ── Mitigación de ataques (M4) ────────────────────────────────────────────
 
     def _buscar_sesion_db_por_ip(self, ip):
@@ -2826,6 +4285,247 @@ class M6Translator:
         except Exception as exc:
             print(f"[M6] Error buscando sesion activa por IP {ip}: {exc}")
             return None
+
+    def _buscar_sesion_db_por_location(self, device_id, in_port):
+        if not (Config.MYSQL_SECURITY_READS_ENABLED and MYSQL_OK):
+            return None
+        try:
+            conn = mysql.connector.connect(
+                host=Config.MYSQL_HOST,
+                user=Config.MYSQL_USER,
+                password=Config.MYSQL_PASS,
+                database=Config.MYSQL_DB,
+                connection_timeout=3,
+            )
+            cur = conn.cursor(dictionary=True)
+            cur.execute(
+                """
+                SELECT s.*, u.codigo_pucp
+                FROM sesiones_activas s
+                LEFT JOIN usuarios u ON u.id_usuario=s.id_usuario
+                WHERE s.switch_dpid=%s
+                  AND s.in_port=%s
+                  AND s.estado='ACTIVA'
+                ORDER BY s.login_timestamp DESC
+                LIMIT 1
+                """,
+                (device_id, int(in_port)),
+            )
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            return row
+        except Exception as exc:
+            print(f"[M6] Error buscando sesion activa por puerto: {exc}")
+            return None
+
+    @staticmethod
+    def _rate_limit_key(device_id, port, event):
+        return f"{device_id}:{int(port)}:{event or 'port_traffic_stress'}"
+
+    def _purgar_rate_limits_expirados(self):
+        now = datetime.now(timezone.utc)
+        expired = []
+        with self._lock:
+            for key, item in list(self.rate_limits.items()):
+                expires_at = self._parse_iso_datetime(item.get("expires_at"))
+                if expires_at and expires_at <= now:
+                    expired.append((key, self.rate_limits.pop(key)))
+        for _key, item in expired:
+            self.onos.eliminar_flow(item.get("device"), item.get("flow_id"))
+            self.onos.eliminar_meter(item.get("device"), item.get("meter_id"))
+        return len(expired)
+
+    def _resolver_rate_limit_target(self, device_id, port):
+        session = self._buscar_sesion_db_por_location(device_id, port)
+        if session:
+            return {
+                "scope": "host_session",
+                "src_ip": session.get("ip_asignada"),
+                "src_mac": session.get("mac_address"),
+                "device": device_id,
+                "port": int(port),
+                "username": session.get("codigo_pucp"),
+            }
+
+        host = self.onos.get_host_by_location(device_id, port)
+        if host and host.get("mac"):
+            return {
+                "scope": "onos_host",
+                "src_ip": host.get("ip"),
+                "src_mac": host.get("mac"),
+                "device": device_id,
+                "port": int(port),
+                "username": None,
+            }
+
+        return {
+            "scope": "port_only",
+            "src_ip": None,
+            "src_mac": None,
+            "device": device_id,
+            "port": int(port),
+            "username": None,
+            "warning": "no se encontro sesion/host ONOS; se limita el puerto completo",
+        }
+
+    def procesar_rate_limit_event(self, alerta):
+        self._purgar_rate_limits_expirados()
+        event = str(alerta.get("event") or "port_traffic_stress")
+        status = str(alerta.get("status") or "firing").lower()
+        device_id = alerta.get("device") or alerta.get("device_id")
+        port = alerta.get("port") or alerta.get("in_port")
+        if not device_id or port is None:
+            return {"ok": False, "error": "se requiere device y port"}
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "port debe ser numerico"}
+
+        if status in {"resolved", "inactive", "ok", "cleared"}:
+            return self.remover_rate_limit({
+                "device": device_id,
+                "port": port,
+                "event": event,
+            })
+        if status != "firing":
+            return {
+                "ok": False,
+                "error": "status no soportado",
+                "status": status,
+                "supported": ["firing", "resolved"],
+            }
+
+        key = self._rate_limit_key(device_id, port, event)
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            existing = dict(self.rate_limits.get(key) or {})
+        expires_at = self._parse_iso_datetime(existing.get("expires_at"))
+        if existing and expires_at and expires_at > now:
+            existing.update({
+                "ok": True,
+                "status": "already_active",
+                "remaining_seconds": int((expires_at - now).total_seconds()),
+            })
+            return existing
+
+        target = self._resolver_rate_limit_target(device_id, port)
+        ttl = Config.RATE_LIMIT_DEFAULT_TTL
+        rate_pps = Config.RATE_LIMIT_DEFAULT_PPS
+        meter_id = self.onos.crear_meter_rate_limit(device_id, rate_pps=rate_pps)
+        if not meter_id:
+            return {
+                "ok": False,
+                "error": "no se pudo crear meter en ONOS",
+                "device": device_id,
+                "port": port,
+                "rate_pps": rate_pps,
+            }
+
+        flow = self.builder.t0_rate_limit_port(
+            device_id,
+            port,
+            meter_id,
+            src_mac=target.get("src_mac"),
+            src_ip=target.get("src_ip"),
+            ttl=ttl,
+        )
+        flow_id = self.onos.instalar_flow(device_id, flow)
+        if not flow_id:
+            self.onos.eliminar_meter(device_id, meter_id)
+            return {
+                "ok": False,
+                "error": "no se pudo instalar flow rate-limit",
+                "device": device_id,
+                "port": port,
+                "meter_id": meter_id,
+            }
+
+        expires_at = now + timedelta(seconds=ttl)
+        result = {
+            "ok": True,
+            "status": (
+                "EXECUTED"
+                if Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_WRITES_ENABLED
+                else "SIMULATED"
+            ),
+            "key": key,
+            "event": event,
+            "severity": alerta.get("severity"),
+            "category": alerta.get("category"),
+            "device": device_id,
+            "port": port,
+            "scope": target.get("scope"),
+            "src_ip": target.get("src_ip"),
+            "src_mac": target.get("src_mac"),
+            "username": target.get("username"),
+            "warning": target.get("warning"),
+            "meter_id": str(meter_id),
+            "flow_id": str(flow_id),
+            "rate_pps": rate_pps,
+            "ttl_seconds": ttl,
+            "table": 0,
+            "priority": Config.PRIO_T0_RATE_LIMIT,
+            "metrics": alerta.get("metrics") or {},
+            "startsAt": alerta.get("startsAt"),
+            "expires_at": expires_at.isoformat(),
+            "flow": flow,
+        }
+        with self._lock:
+            self.rate_limits[key] = dict(result)
+        self.logger.log({
+            "modulo": "M6",
+            "evento": "rate_limit_applied",
+            "key": key,
+            "device": device_id,
+            "port": port,
+            "scope": target.get("scope"),
+            "src_ip": target.get("src_ip"),
+            "src_mac": target.get("src_mac"),
+            "rate_pps": rate_pps,
+            "ttl": ttl,
+        })
+        return result
+
+    def remover_rate_limit(self, data):
+        self._purgar_rate_limits_expirados()
+        device_id = data.get("device") or data.get("device_id")
+        port = data.get("port") or data.get("in_port")
+        event = data.get("event") or "port_traffic_stress"
+        if not device_id or port is None:
+            return {"ok": False, "error": "se requiere device y port"}
+        try:
+            key = self._rate_limit_key(device_id, int(port), event)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "port debe ser numerico"}
+        with self._lock:
+            item = self.rate_limits.pop(key, None)
+        if not item:
+            return {"ok": False, "error": "rate-limit no encontrado", "key": key}
+        flow_ok = self.onos.eliminar_flow(item.get("device"), item.get("flow_id"))
+        meter_ok = self.onos.eliminar_meter(item.get("device"), item.get("meter_id"))
+        item.update({
+            "ok": bool(flow_ok and meter_ok),
+            "status": "REMOVED" if flow_ok and meter_ok else "REMOVE_FAILED",
+            "removed_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return item
+
+    def listar_rate_limits(self, active_only=False):
+        self._purgar_rate_limits_expirados()
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            items = [dict(item) for item in self.rate_limits.values()]
+        for item in items:
+            expires_at = self._parse_iso_datetime(item.get("expires_at"))
+            remaining = None
+            if expires_at:
+                remaining = max(0, int((expires_at - now).total_seconds()))
+            item["remaining_seconds"] = remaining
+            item["active"] = remaining is None or remaining > 0
+        if active_only:
+            items = [item for item in items if item.get("active")]
+        return items
 
     def _resolver_contexto_mitigacion(self, alerta):
         src_ip = alerta.get("src_ip") or alerta.get("ip_atacante")
@@ -3161,7 +4861,9 @@ class M6Translator:
     def dashboard_summary(self):
         devices = self.onos.get_devices()
         mitigations = self.listar_mitigaciones(active_only=False)
+        rate_limits = self.listar_rate_limits(active_only=False)
         active_mitigations = [m for m in mitigations if m.get("active")]
+        active_rate_limits = [r for r in rate_limits if r.get("active")]
         with self._lock:
             sessions = dict(self.flows_por_sesion)
             portals = dict(self.flows_portal)
@@ -3178,6 +4880,8 @@ class M6Translator:
             "portal_hosts_count": len(portals),
             "mitigations_count": len(mitigations),
             "active_mitigations_count": len(active_mitigations),
+            "rate_limits_count": len(rate_limits),
+            "active_rate_limits_count": len(active_rate_limits),
             "portal_sync_interval": Config.PORTAL_SYNC_INTERVAL,
             "portal_forward_permanent": Config.PORTAL_FORWARD_PERMANENT,
             "portal_return_timeout": Config.PORTAL_RETURN_TIMEOUT,
@@ -3466,6 +5170,35 @@ def endpoint_security_mitigations():
     return jsonify({"ok": True, "mitigations": mitigations}), 200
 
 
+@app.route("/m6/security/rate-limit", methods=["POST"])
+def endpoint_security_rate_limit():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    result = m6.procesar_rate_limit_event(request.json or {})
+    if result.get("ok"):
+        return jsonify(result), 200
+    return jsonify(result), 400
+
+
+@app.route("/m6/security/rate-limit/remove", methods=["POST"])
+def endpoint_security_rate_limit_remove():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    result = m6.remover_rate_limit(request.json or {})
+    return jsonify(result), 200 if result.get("ok") else 404
+
+
+@app.route("/m6/security/rate-limits", methods=["GET"])
+def endpoint_security_rate_limits():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    active_only = str(request.args.get("active", "")).lower() in {"1", "true", "yes"}
+    return jsonify({
+        "ok": True,
+        "rate_limits": m6.listar_rate_limits(active_only=active_only),
+    }), 200
+
+
 @app.route("/m6/security/host-state", methods=["GET"])
 def endpoint_host_state():
     if not _security_token_valido():
@@ -3595,6 +5328,7 @@ def endpoint_m6_dashboard():
       <button class="tab" data-view="portal">Portal</button>
       <button class="tab" data-view="sessions">Sesiones</button>
       <button class="tab" data-view="mitigations">Mitigaciones</button>
+      <button class="tab" data-view="failover">Failover</button>
       <button class="tab" data-view="flows">Flows</button>
       <button class="tab" data-view="events">Eventos</button>
     </div>
@@ -3618,6 +5352,23 @@ def endpoint_m6_dashboard():
     <section id="mitigations" class="view">
       <div class="filters"><input id="mitigationFilter" placeholder="Filtrar IP, SID o acción"></div>
       <div class="table-wrap"><table><thead><tr><th>Estado</th><th>IP/MAC</th><th>SID</th><th>Acción</th><th>Destino</th><th>Tiempo</th><th>Flow IDs</th><th>Levantar</th></tr></thead><tbody id="mitigationRows"></tbody></table></div>
+    </section>
+
+    <section id="failover" class="view">
+      <div class="filters">
+        <select id="failoverDevice">
+          <option value="of:0000e2ecb0ea0445">Simular caída SW2</option>
+          <option value="of:0000eadb63449748">Simular caída SW3</option>
+          <option value="of:00007e3892af7141">Simular caída SW1</option>
+          <option value="of:00006a0757adfc4e">Simular caída SW4</option>
+          <option value="of:0000ca126249d546">Simular caída SW5</option>
+        </select>
+        <button id="runFailover" class="primary">Analizar</button>
+        <button id="planFailoverRecovery">Plan recovery</button>
+      </div>
+      <div class="grid" id="failoverGrid"></div>
+      <div class="table-wrap"><table><thead><tr><th>Sesión</th><th>Host</th><th>Estado</th><th>Permisos afectados</th><th>Ruta alternativa</th></tr></thead><tbody id="failoverRows"></tbody></table></div>
+      <div class="panel" style="margin-top:12px"><pre id="failoverRaw"></pre></div>
     </section>
 
     <section id="flows" class="view">
@@ -3797,6 +5548,8 @@ document.getElementById('flowMinPriority').oninput = renderFlows;
 document.getElementById('flowDevice').onchange = () => load(true);
 document.getElementById('flowTable').onchange = () => load(true);
 document.getElementById('loadEvents').onclick = () => load(true);
+document.getElementById('runFailover').onclick = () => runFailover();
+document.getElementById('planFailoverRecovery').onclick = () => planFailoverRecovery();
 document.getElementById('ensurePortal').onclick = async () => {
   try { await api('/m6/portal/sync?force=1', {method: 'POST'}); setStatus('Portal reasegurado.'); await load(true); }
   catch (e) { setStatus('Error: ' + e.message); }
@@ -3813,6 +5566,8 @@ async function load(force=false) {
       const data = await api('/m6/dashboard/sessions'); state.data.sessions = data; renderSessions(data);
     } else if (state.view === 'mitigations') {
       const data = await api('/m6/security/mitigations?active=0'); state.data.mitigations = data.mitigations || []; renderMitigations();
+    } else if (state.view === 'failover') {
+      const topo = await api('/m6/failover/topology'); state.data.failoverTopology = topo; renderFailoverTopology(topo);
     } else if (state.view === 'flows') {
       const dev = document.getElementById('flowDevice').value;
       const table = document.getElementById('flowTable').value;
@@ -3856,6 +5611,93 @@ function renderMitigations() {
 }
 async function unmitigate(id) { if (!id || !confirm('Levantar mitigacion?')) return; await api('/m6/security/unmitigate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({incident_id:id})}); await load(true); }
 window.unmitigate = unmitigate;
+async function runFailover() {
+  const device = document.getElementById('failoverDevice').value;
+  try {
+    const data = await api('/m6/failover/analyze', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({failed_devices: [device]})
+    });
+    state.data.failover = data;
+    renderFailover(data);
+    setStatus('Failover dry-run OK para ' + swLabel(device));
+  } catch (e) {
+    setStatus('Error failover: ' + e.message);
+  }
+}
+async function planFailoverRecovery() {
+  try {
+    const data = await api('/m6/failover/recover', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({apply: false})
+    });
+    state.data.failover = data;
+    renderFailoverRecovery(data);
+    setStatus('Plan de recovery generado sin instalar ni borrar flows.');
+  } catch (e) {
+    setStatus('Error recovery: ' + e.message);
+  }
+}
+function renderFailoverTopology(d) {
+  document.getElementById('failoverGrid').innerHTML = [
+    metric('Switches disponibles', (d.available_devices || []).length),
+    metric('Switches caidos', (d.unavailable_devices || []).length, (d.unavailable_devices || []).length ? 'bad' : 'ok'),
+    metric('Links ONOS', d.links_count || 0),
+    metric('Hosts ONOS', d.hosts_count || 0),
+    metric('Auto reinstall', d.failover_auto_reinstall_enabled ? 'ON' : 'OFF', d.failover_auto_reinstall_enabled ? 'warn' : 'ok')
+  ].join('');
+  document.getElementById('failoverRows').innerHTML = '<tr><td colspan="5" class="muted">Elige un switch y presiona Analizar. No se instalaran ni borraran flows.</td></tr>';
+  document.getElementById('failoverRaw').textContent = JSON.stringify(d, null, 2);
+}
+function renderFailoverRecovery(d) {
+  const planned = d.planned || [];
+  const permissions = planned.reduce((sum, item) => sum + ((item.permissions || []).length), 0);
+  document.getElementById('failoverGrid').innerHTML = [
+    metric('Sesiones planificadas', planned.length),
+    metric('Permisos a reinstalar', permissions),
+    metric('Modo', d.dry_run ? 'DRY-RUN' : 'APPLY', d.dry_run ? 'ok' : 'warn'),
+    metric('Auto reinstall', d.auto_reinstall_enabled ? 'ON' : 'OFF', d.auto_reinstall_enabled ? 'warn' : 'ok')
+  ].join('');
+  document.getElementById('failoverRows').innerHTML = planned.length ? planned.map(item => {
+    const perms = item.permissions || [];
+    return `<tr>
+      <td><code>${esc(item.session_id || '-')}</code><br>${esc(item.codigo_pucp || '')}</td>
+      <td><code>${esc(item.ip || '-')}</code><br><code>${esc(item.mac || '-')}</code><br>${esc(swLabel(item.switch_dpid))} port ${esc(item.in_port || '-')}</td>
+      <td>${item.ok ? '<span class="badge ok">PLAN</span>' : '<span class="badge bad">INVALID</span>'}</td>
+      <td>${perms.map(p => `<span class="chip action">${esc(p.table)} ${esc(p.dst_ip)}:${esc(p.tcp_port || '-')}</span>`).join('') || '<span class="muted">Sin permisos a reinstalar</span>'}</td>
+      <td><span class="hint">Este plan no borra ni instala flows. Aplicar requiere curl con apply=true y flag activo.</span></td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="5"><span class="muted">No hay sesiones activas para recovery</span></td></tr>';
+  document.getElementById('failoverRaw').textContent = JSON.stringify(d, null, 2);
+}
+function compactPath(path) {
+  return (path || []).map(p => `${swLabel(p.device_id)}:${p.in_port}->${p.out_port}`).join(' | ') || '-';
+}
+function renderFailover(d) {
+  const s = d.summary || {};
+  document.getElementById('failoverGrid').innerHTML = [
+    metric('Sesiones totales', d.sessions_total ?? 0),
+    metric('Afectadas', s.impacted_sessions ?? 0, (s.impacted_sessions || 0) ? 'warn' : 'ok'),
+    metric('Recuperables', s.recoverable_sessions ?? 0, (s.recoverable_sessions || 0) ? 'ok' : ''),
+    metric('Sin ruta', s.unavailable_sessions ?? 0, (s.unavailable_sessions || 0) ? 'bad' : 'ok'),
+    metric('Auto reinstall', d.auto_reinstall_enabled ? 'ON' : 'OFF', d.auto_reinstall_enabled ? 'warn' : 'ok')
+  ].join('');
+  const rows = d.impacted || [];
+  document.getElementById('failoverRows').innerHTML = rows.length ? rows.map(item => {
+    const perms = (item.permissions || []).filter(p => p.status !== 'unaffected');
+    return `<tr>
+      <td><code>${esc(item.session_id || '-')}</code><br>${esc(item.codigo_pucp || '')}</td>
+      <td><code>${esc(item.ip || '-')}</code><br><code>${esc(item.mac || '-')}</code><br>${esc(swLabel(item.switch_dpid))} port ${esc(item.in_port || '-')}</td>
+      <td>${item.recoverable ? '<span class="badge ok">RECOVERABLE</span>' : '<span class="badge bad">UNAVAILABLE</span>'}</td>
+      <td>${perms.map(p => `<span class="chip ${p.recoverable ? 'action' : 'drop'}">${esc(p.dst_ip)}:${esc(p.tcp_port || '-')} ${esc(p.status)}</span>`).join('') || '<span class="muted">Sin permisos afectados</span>'}</td>
+      <td>${perms.map(p => `<div><strong>${esc(p.dst_ip)}:${esc(p.tcp_port || '-')}</strong><br><span class="hint">ida: ${esc(compactPath(p.alternative_ida))}</span><span class="hint">vuelta: ${esc(compactPath(p.alternative_retorno))}</span></div>`).join('')}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="5"><span class="badge ok">Sin sesiones afectadas</span></td></tr>';
+  document.getElementById('failoverRaw').textContent = JSON.stringify(d, null, 2);
+}
+window.runFailover = runFailover;
 function renderFlows() {
   const q = document.getElementById('flowFilter').value.toLowerCase();
   const kind = document.getElementById('flowKind').value;
@@ -4080,6 +5922,42 @@ def endpoint_monitoring_gre_status():
     return jsonify(result), 200 if result.get("ok") else 500
 
 
+@app.route("/m6/failover/topology", methods=["GET"])
+def endpoint_failover_topology():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    result = m6.estado_failover_topologia()
+    return jsonify(result), 200 if result.get("ok") else 500
+
+
+@app.route("/m6/failover/analyze", methods=["POST"])
+def endpoint_failover_analyze():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    data = request.json or {}
+    result = m6.analizar_failover(data)
+    return jsonify(result), 200 if result.get("ok") else 500
+
+
+@app.route("/m6/failover/recover", methods=["POST"])
+def endpoint_failover_recover():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    data = request.json or {}
+    result = m6.recuperar_failover(data)
+    status = 200 if result.get("ok") else 409
+    return jsonify(result), status
+
+
+@app.route("/m6/failover/event", methods=["POST"])
+def endpoint_failover_event():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    data = request.json or {}
+    result = m6.procesar_failover_event(data)
+    return jsonify(result), 200 if result.get("ok") else 500
+
+
 @app.route("/m6/arranque", methods=["POST"])
 def endpoint_arranque():
     """El arranque legacy queda deshabilitado para evitar reglas obsoletas."""
@@ -4093,6 +5971,7 @@ def endpoint_arranque():
 @app.route("/m6/status", methods=["GET"])
 def endpoint_status():
     """Healthcheck — estado de ONOS y sesiones activas."""
+    m6._purgar_rate_limits_expirados()
     devices = m6.onos.get_devices()
     with m6._lock:
         sesiones = {mac: len(flows)
@@ -4100,6 +5979,8 @@ def endpoint_status():
         portal_flows = {mac: len(flows)
                         for mac, flows in m6.flows_portal.items()}
         portal_ips = dict(m6.portal_ips)
+        path_records = sum(len(items) for items in m6.path_records.values())
+        rate_limits_active = len(m6.rate_limits)
         now = time.time()
         t0_shared_flows = sum(
             1 for _, _, expires_at in m6.flows_t0_shared.values()
@@ -4114,10 +5995,16 @@ def endpoint_status():
         "sesiones_activas": sesiones,
         "portal_flows":     portal_flows,
         "portal_ips":       portal_ips,
+        "path_records":     path_records,
         "t0_shared_flows":  t0_shared_flows,
+        "rate_limits_active": rate_limits_active,
+        "rate_limit_default_pps": Config.RATE_LIMIT_DEFAULT_PPS,
+        "rate_limit_default_ttl": Config.RATE_LIMIT_DEFAULT_TTL,
         "network_actions_enabled": Config.NETWORK_ACTIONS_ENABLED,
         "onos_writes_enabled": Config.ONOS_WRITES_ENABLED,
         "onos_reads_enabled": Config.ONOS_READS_ENABLED,
+        "failover_analysis_enabled": Config.FAILOVER_ANALYSIS_ENABLED,
+        "failover_auto_reinstall_enabled": Config.FAILOVER_AUTO_REINSTALL_ENABLED,
         "ovsdb_actions_enabled": Config.OVSDB_ACTIONS_ENABLED,
         "automatic_actions_enabled": Config.M4_AUTOMATIC_ACTIONS_ENABLED,
         "startup_flow_install_enabled": Config.STARTUP_FLOW_INSTALL_ENABLED,

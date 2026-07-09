@@ -24,6 +24,7 @@ BASE_SCORES = {
     "suricata_tls": 10,
     "suricata_flow": 5,
     "fan_out": 45,
+    "icmp_large_payload": 55,
 }
 
 
@@ -71,6 +72,8 @@ class RiskEngine:
     def _select_action(score: int, event_types: set[str]) -> SecurityAction:
         if "suricata_critical" in event_types:
             return SecurityAction.BLOCK
+        if "icmp_large_payload" in event_types:
+            return SecurityAction.TEMP_BLOCK
         if "invalid_ip_mac_binding" in event_types:
             return SecurityAction.TEMP_BLOCK
         if score >= 80:
@@ -91,6 +94,7 @@ class RiskEngine:
             "web_attack",
             "possible_ddos",
             "possible_exfiltration",
+            "icmp_large_payload",
             "port_scan",
             "policy_denial_burst",
             "policy_denial",

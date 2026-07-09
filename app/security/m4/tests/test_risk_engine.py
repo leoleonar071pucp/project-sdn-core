@@ -93,3 +93,30 @@ def test_suricata_sqli_maps_to_temporary_block():
     assert event.event_type == "web_attack"
     assert event.severity == 70
     assert decision.recommended_action == SecurityAction.TEMP_BLOCK
+
+
+def test_suricata_large_icmp_maps_to_temporary_block():
+    event = normalize_suricata_event(
+        {
+            "event_type": "alert",
+            "src_ip": "192.168.100.55",
+            "dest_ip": "192.168.100.101",
+            "proto": "ICMP",
+            "alert": {
+                "signature_id": 9000018,
+                "signature": "SDN DEMO possible ICMP tunneling - large payload",
+                "severity": 2,
+            },
+        }
+    )
+    evidence = CorrelatedEvidence(
+        incident_key=event.identity_key(),
+        events=[event],
+        sources={EventSource.SURICATA},
+    )
+
+    decision = RiskEngine().evaluate(evidence)
+
+    assert event.event_type == "icmp_large_payload"
+    assert event.severity == 55
+    assert decision.recommended_action == SecurityAction.TEMP_BLOCK

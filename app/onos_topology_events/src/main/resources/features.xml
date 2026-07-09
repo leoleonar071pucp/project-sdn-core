@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<features name="pe.edu.pucp.sdn-onos-topology-events"
+          xmlns="http://karaf.apache.org/xmlns/features/v1.2.0">
+    <feature name="pucp-sdn-topology-events" version="1.0.0">
+        <feature>onos-api</feature>
+        <bundle>mvn:pe.edu.pucp.sdn/onos-topology-events/1.0.0</bundle>
+    </feature>
+</features>

@@ -10,7 +10,7 @@ SURICATA_SID_POLICY = {
     9000010: ("port_scan", 50),
     9000002: ("web_attack", 70),
     9000014: ("web_attack", 70),
-    9000018: ("suricata_medium", 45),
+    9000018: ("icmp_large_payload", 55),
     9000027: ("suricata_medium", 50),
     9000028: ("suricata_medium", 50),
     9000029: ("suricata_medium", 50),

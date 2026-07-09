@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>pe.edu.pucp.sdn</groupId>
+  <artifactId>onos-topology-events</artifactId>
+  <version>1.0.0</version>
+  <packaging>bundle</packaging>
+
+  <name>PUCP SDN ONOS Topology Events</name>
+  <description>ONOS listener that forwards DeviceEvent and LinkEvent topology changes to M6.</description>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.source>11</maven.compiler.source>
+    <maven.compiler.target>11</maven.compiler.target>
+    <onos.version>2.7.0</onos.version>
+    <app.name>pe.edu.pucp.sdn.topology-events</app.name>
+    <app.title>PUCP SDN Topology Events</app.title>
+    <app.category>Monitoring</app.category>
+    <app.url>https://github.com/leoleonar071pucp/project-sdn-core</app.url>
+    <app.origin>PUCP TEL354 Grupo 2</app.origin>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.onosproject</groupId>
+      <artifactId>onos-api</artifactId>
+      <version>${onos.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.osgi</groupId>
+      <artifactId>org.osgi.service.component.annotations</artifactId>
+      <version>1.4.0</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.osgi</groupId>
+      <artifactId>org.osgi.service.component</artifactId>
+      <version>1.4.0</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>1.7.36</version>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.felix</groupId>
+        <artifactId>maven-bundle-plugin</artifactId>
+        <version>5.1.8</version>
+        <extensions>true</extensions>
+        <configuration>
+          <instructions>
+            <Bundle-SymbolicName>${app.name}</Bundle-SymbolicName>
+            <Bundle-Name>${app.title}</Bundle-Name>
+            <Bundle-Version>${project.version}</Bundle-Version>
+            <Private-Package>pe.edu.pucp.sdn.topology</Private-Package>
+            <Import-Package>
+              !java.*,
+              org.onosproject.core,
+              org.onosproject.event,
+              org.onosproject.net,
+              org.onosproject.net.device,
+              org.onosproject.net.link,
+              org.osgi.service.component,
+              org.slf4j
+            </Import-Package>
+          </instructions>
+        </configuration>
+      </plugin>
+      <plugin>
+        <artifactId>maven-assembly-plugin</artifactId>
+        <version>3.6.0</version>
+        <configuration>
+          <descriptors>
+            <descriptor>src/main/assembly/oar.xml</descriptor>
+          </descriptors>
+          <finalName>${project.artifactId}-${project.version}</finalName>
+          <appendAssemblyId>false</appendAssemblyId>
+        </configuration>
+        <executions>
+          <execution>
+            <id>make-oar</id>
+            <phase>package</phase>
+            <goals>
+              <goal>single</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>3.1.0</version>
+        <executions>
+          <execution>
+            <id>copy-oar-extension</id>
+            <phase>package</phase>
+            <configuration>
+              <target>
+                <copy file="${project.build.directory}/${project.artifactId}-${project.version}.zip"
+                      tofile="${project.build.directory}/${project.artifactId}-${project.version}.oar"/>
+              </target>
+            </configuration>
+            <goals>
+              <goal>run</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
