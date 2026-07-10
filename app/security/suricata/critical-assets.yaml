@@ -1,0 +1,31 @@
+assets:
+  - id: portal
+    description: Portal cautivo
+    destination_ip: 10.0.0.10
+    bridge: REQUIRED
+    source_port: REQUIRED
+    output_tunnel_port: REQUIRED
+  - id: radius
+    description: FreeRADIUS
+    destination_ip: REQUIRED
+    bridge: REQUIRED
+    source_port: REQUIRED
+    output_tunnel_port: REQUIRED
+  - id: grades
+    description: Servidor de notas
+    destination_ip: 10.0.0.30
+    bridge: REQUIRED
+    source_port: REQUIRED
+    output_tunnel_port: REQUIRED
+  - id: admin
+    description: Panel administrativo
+    destination_ip: 10.0.0.40
+    bridge: REQUIRED
+    source_port: REQUIRED
+    output_tunnel_port: REQUIRED
+  - id: database
+    description: Base de datos crítica
+    destination_ip: REQUIRED
+    bridge: REQUIRED
+    source_port: REQUIRED
+    output_tunnel_port: REQUIRED

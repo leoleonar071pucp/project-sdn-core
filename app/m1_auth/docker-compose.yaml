@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+
+#  radius:
+#    image: freeradius/freeradius-server:latest
+#    container_name: m1-radius_server
+#    network_mode: "host"
+#    environment:
+#      FR_SQL_HOST: 127.0.0.1
+#      FR_SQL_PORT: 3306
+#      FR_SQL_USER: radius
+#      FR_SQL_PASSWORD: radius_pass
+#      
+#      FR_SQL_DATABASE: radius
+#      FR_SQL_DRIVER: rlm_sql_mysql
+#      FR_RADIUS_SECRET: testing123
+#    volumes:
+#      - ./radius/clients.conf:/etc/freeradius/clients.conf # :ro
+    # depends_on:
+    #  - db
+    # restart: unless-stopped
+
+
+  portal:
+    build: .
+    container_name: m1-portal_auth
+    network_mode: "host"
+    volumes:
+      - .:/app/m1_auth                     # Monta código (web.py, m1_auth.py, etc.)
+    # depends_on:
+    #  - db
+    #  - radius
+    # restart: unless-stopped

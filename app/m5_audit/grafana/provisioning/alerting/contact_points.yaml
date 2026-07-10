@@ -1,0 +1,24 @@
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: "M6 Webhook"
+    receivers:
+      - uid: "m6-webhook"
+        type: "webhook"
+        settings:
+          url: "http://127.0.0.1:8080/m6/security/rate-limit"
+          httpMethod: "POST"
+          payload:
+            template: '{{ template "m6.port_traffic_stress" . }}'
+          maxAlerts: 10
+
+  - orgId: 1
+    name: "Dummy"
+    receivers:
+      - uid: "dummy-webhook"
+        type: "webhook"
+        settings:
+          url: "http://127.0.0.1:65535/dummydiscard"
+          httpMethod: "POST"
+          maxAlerts: 10

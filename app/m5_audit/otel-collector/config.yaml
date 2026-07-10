@@ -1,0 +1,78 @@
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  attributes/loki:
+    actions:
+      - key: event_name
+        action: upsert
+
+      - key: user_id
+        action: upsert
+
+      - key: role_name
+        action: upsert
+
+  memory_limiter:
+    check_interval: 5s
+    limit_percentage: 50
+    spike_limit_percentage: 25
+
+  batch:
+
+exporters:
+  otlp_http/tempo:
+    endpoint: http://tempo:4318
+    tls:
+      insecure: true
+
+  otlp_http/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+    
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers:
+        - otlp
+      processors:
+        - memory_limiter
+        - batch
+      exporters:
+        - otlp_http/tempo
+        - debug
+
+    logs:
+      receivers:
+        - otlp
+      processors:
+        - memory_limiter
+        - batch
+      exporters:
+        - otlp_http/loki
+        - debug
+    
+    metrics:
+      receivers:
+        - otlp
+      processors:
+        - memory_limiter
+        - batch
+      exporters:
+        - prometheus
+        - debug

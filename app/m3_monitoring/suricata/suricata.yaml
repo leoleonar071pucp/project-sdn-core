@@ -1,0 +1,164 @@
+%YAML 1.1
+---
+# Configuración de variables de red
+vars:
+  address-groups:
+    HOME_NET: "[192.168.100.0/24]"
+    EXTERNAL_NET: "!$HOME_NET"
+
+    HTTP_SERVERS: "$HOME_NET"
+    SQL_SERVERS: "$HOME_NET"
+
+# Ruta de reglas
+default-rule-path: /etc/suricata/rules
+rule-files:
+  - local.rules
+
+# ------------------ DPDK ------------------
+dpdk:
+  eal-params:
+    proc-type: primary
+    allow: ["0000:00:05.0"]
+  interfaces:
+    - interface: "0000:00:05.0"   #PCI real de ens5
+      threads: auto
+      promisc: true
+      checksum-checks: true
+      mtu: 1500     # Modificar segun tráfico GRE
+
+# ------------------ Threading ------------------
+threading:
+  set-cpu-affinity: yes
+  # Mapa de CPUs: asignamos el core 2 para gestión, y core 3 para unico worker
+  cpu-affinity:
+    - management-cpu-set:
+        cpu: [2]
+    - receive-cpu-set:
+        cpu: [2]
+    - worker-cpu-set:
+        cpu: [3]
+        mode: "exclusive"
+
+# ------------------ Decodificación y detección ------------------
+decoder:
+  gre:
+    enabled: yes        # Enable GRE packet decoding
+    checksum-validation: no
+  vlan:
+    use-for-tracking: true  # Track VLAN IDs in flow hashing
+  ipv6:
+    enabled: no
+
+# ------------------ Flujo y desempeño ------------------
+flow:
+  memcap: 64mb
+  hash-size: 16384
+  prealloc: 5000
+  emergency-recovery: 30
+
+flow-timeouts:
+  default:
+    new: 30
+    established: 300
+    closed: 0
+    emergency-new: 10
+    emergency-established: 100
+    emergency-closed: 0
+
+stream:
+  memcap: 32mb
+  checksum-validation: no
+  inline: no                    # no estamos en inline
+  reassembly:
+    memcap: 64mb
+    depth: 1mb                  # profundidad de reassembly
+
+# ------------------ Outputs (logs) ------------------
+outputs:
+  - fast:
+      enabled: no
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve.json
+      # Puedes usar un socket UNIX o syslog si quieres, pero regular es fácil
+      # levels: [info, notice, warning, error]
+      types:
+        - alert
+        - anomaly:
+            enabled: yes
+            types:
+              - decode
+        - http
+        - dns
+        - tls
+        - arp:
+            enabled: yes
+        - dhcp:
+            enabled: yes
+        - flow
+        - netflow
+  - stats:
+      enabled: yes
+      filename: stats.log
+      interval: 20
+
+# ------------------ Logging de Suricata ------------------
+logging:
+  default-log-level: info
+  # Puedes definir outputs de logs (syslog, archivo)
+  outputs:
+    - console:
+        enabled: yes
+        type: json
+    - file:
+        enabled: yes
+        filename: suricata.log
+
+# ------------------ Detección y reglas ------------------
+detect:
+  profile: medium    # balance entre rendimiento y precisión
+  # custom-values:
+  #   toserver-groups: 3
+  #   toclient-groups: 3
+  #   sgh-mpm-context: auto
+  #   inspection-recursion-limit: 3000
+
+# ------------------ AppLayer (HTTP, TLS, etc.) ------------------
+app-layer:
+  protocols:
+    tls:
+      enabled: yes
+      encryption-handling: track-only
+      detection-ports:
+        dp: [443, 8443, 465, 993, 995]
+    http:
+      enabled: yes
+      detection-ports:
+        dp: [80, 8080, 3128, 8001, 8002, 8083, 8118, 8888, 591, 9000]
+      memcap: 64mb
+      # Configuración adicional de HTTP
+    dns:
+      enabled: yes
+      # puertos
+      tcp:
+        detection-ports:
+          dp: [53]
+      udp:
+        detection-ports:
+          dp: [53]
+    arp:
+      enabled: yes
+    # Otros protocolos...
+
+
+# ------------------ Engine de detección ----
+engine-analysis:
+  rules-fast-pattern: yes
+  rules: yes
+
+# ------------------ Anomaly detection ------------------
+anomaly:
+  # Habilita si quieres logs de anomalías (ya lo pusiste en eve-log)
+  # por defecto está activo.
+

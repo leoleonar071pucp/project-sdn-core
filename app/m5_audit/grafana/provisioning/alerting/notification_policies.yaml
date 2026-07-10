@@ -1,0 +1,20 @@
+apiVersion: 1
+
+policies:
+  - orgId: 1
+
+    receiver: Dummy
+
+    routes:
+      - receiver: M6 Webhook
+
+        object_matchers:
+          - ["alert_type", "=", "port_traffic_stress"]
+
+    group_by:
+      - device
+      - port
+
+    group_wait: 0s
+    group_interval: 30s
+    repeat_interval: 1h

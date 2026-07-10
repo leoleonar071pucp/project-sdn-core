@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<app name="pe.edu.pucp.sdn.topology-events"
+     origin="PUCP TEL354 Grupo 2"
+     version="1.0.0"
+     category="Monitoring"
+     title="PUCP SDN Topology Events"
+     url="https://github.com/leoleonar071pucp/project-sdn-core"
+     featuresRepo="mvn:pe.edu.pucp.sdn/onos-topology-events/1.0.0/xml/features"
+     features="pucp-sdn-topology-events">
+    <description>
+        Listens to ONOS DeviceEvent and LinkEvent topology changes and forwards
+        controlled failover notifications to M6.
+    </description>
+</app>

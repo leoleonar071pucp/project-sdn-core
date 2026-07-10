@@ -1,0 +1,38 @@
+# 1. Escaneo TCP SYN (Nmap -sS)
+alert tcp any any -> $HOME_NET any (msg:"SDN DEMO TCP SYN port scan"; flags:S; flow:to_server; threshold:type both, track by_src, count 20, seconds 10; classtype:attempted-recon; priority:3; sid:9000001; rev:3;)
+
+# 2. Escaneo TCP XMAS (Nmap -sX)
+alert tcp any any -> $HOME_NET any (msg:"SDN DEMO Nmap XMAS scan"; flags:FPU; flow:to_server; classtype:attempted-recon; priority:3; sid:9000008; rev:2;)
+
+# 3. Escaneo TCP NULL (Nmap -sN)
+alert tcp any any -> $HOME_NET any (msg:"SDN DEMO Nmap NULL scan"; flags:0; flow:to_server; classtype:attempted-recon; priority:3; sid:9000009; rev:2;)
+
+# 4. SQL Injection en URL
+alert http any any -> $HOME_NET any (msg:"SDN DEMO possible SQL injection"; flow:to_server, established; http.uri; pcre:"/(\%27)|(')|(--)|(\%23)|(#)|(\bunion\b.*\bselect\b)/Ui"; classtype:web-application-attack; priority:2; sid:9000002; rev:3;)
+
+# 7. Path Traversal (Directory Traversal)
+alert http any any -> $HOME_NET any (msg:"SDN DEMO path traversal attempt"; flow:to_server, established; http.uri; content:"../"; nocase; classtype:web-application-attack; priority:2; sid:9000014; rev:2;)
+
+# 8. SSH Brute Force (umbral bajo: 5 intentos en 30s)
+alert tcp any any -> $HOME_NET 22 (msg:"SDN DEMO SSH brute force attempt"; flow:to_server, established; threshold:type both, track by_src, count 5, seconds 30; classtype:attempted-admin; priority:2; sid:9000013; rev:3;)
+
+# 9. RDP Brute Force (umbral bajo: 5 intentos en 30s)
+alert tcp any any -> $HOME_NET 3389 (msg:"SDN DEMO RDP brute force attempt"; flow:to_server, established; threshold:type both, track by_src, count 5, seconds 30; classtype:attempted-admin; priority:2; sid:9000012; rev:3;)
+
+# 10. ICMP Tunneling - Payload grande (>64 bytes)
+alert icmp any any -> $HOME_NET any (msg:"SDN DEMO possible ICMP tunneling - large payload"; itype:8; dsize:>64; classtype:attempted-recon; priority:2; sid:9000018; rev:2;)
+
+# 11. DNS Tunneling - Nombre de dominio muy largo (>52 chars)
+alert dns any any -> any any (msg:"SDN DEMO possible DNS tunneling - long domain"; dns.query; pcre:"/^[a-zA-Z0-9._-]{52,}/"; classtype:attempted-recon; priority:2; sid:9000015; rev:2;)
+
+# 12. SSH en puerto no estándar (ej. distinto de 22)
+alert tcp any any -> $HOME_NET any (msg:"SDN DEMO SSH on non-standard port"; flow:to_server, established; content:"SSH-"; depth:10; classtype:attempted-recon; priority:3; sid:9000026; rev:2;)
+
+# 13. ARP Spoofing (respuestas ARP no solicitadas)
+alert arp any any -> any any (msg:"SDN DEMO possible ARP spoofing"; arp.opcode:2; threshold:type both, track by_src, count 3, seconds 5; classtype:attempted-recon; priority:2; sid:9000021; rev:3;)
+
+# 14. HTTP en puerto no estándar (ni 80, 8080 ni 443)
+alert tcp any any -> $HOME_NET ![80,8080,443] (msg:"SDN DEMO HTTP on non-standard port"; flow:to_server, established; app-layer-protocol:http; classtype:attempted-recon; priority:3; sid:9000024; rev:2;)
+
+# 15. FTP Exfiltración (comando STOR en puerto 21)
+alert tcp any any -> $HOME_NET 21 (msg:"SDN DEMO possible FTP exfiltration"; flow:to_server, established; content:"STOR"; nocase; classtype:attempted-recon; priority:2; sid:9000036; rev:2;)

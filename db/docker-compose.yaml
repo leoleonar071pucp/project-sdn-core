@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+
+  db:
+    image: mysql:8.0
+    container_name: db-sql
+    network_mode: "host"
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_HOST: localhost
+      MYSQL_USER: radius
+      MYSQL_PASSWORD: radius_pass
+      MYSQL_DB: radius_db
+      MYSQL_DATABASE: radius_db
+    volumes:
+      - ./mysql_data:/var/lib/mysql
+      - ./radius_db_pucp_sdn.sql:/docker-entrypoint-initdb.d/init.sql
+    command: 
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-name-resolve

@@ -1,0 +1,247 @@
+apiVersion: 1
+
+groups:
+  - name: SDN Alerts
+    folder: SDN
+    interval: 30s
+
+    rules:
+      # Puerto saturado por tráfico (bps)
+      - uid: port_traffic_stress
+        title: "High traffic on {{ $labels.device }}:{{ $labels.port }}"
+        condition: C
+
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sdn_port_rx_bps
+              intervalMs: 30000
+              maxDataPoints: 43200
+              refId: A
+
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sdn_port_tx_bps
+              intervalMs: 30000
+              maxDataPoints: 43200
+              refId: B
+
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: |
+                (sdn_port_rx_bps > 10000000) or (sdn_port_tx_bps > 10000000)
+              intervalMs: 30000
+              maxDataPoints: 43200
+              refId: C
+
+        noDataState: OK
+        execErrState: Error
+        for: 15s
+        labels:
+          alert_type: port_traffic_stress
+          severity: warning
+          category: performance
+        annotations:
+          summary: "High traffic detected on port"
+          description: |
+            Port {{ $labels.device }}:{{ $labels.port }}
+            exceeded 10 Mbps.
+
+      # Switch down
+      - uid: switch_down
+        title: "Switch {{ $labels.device }} is DOWN"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: onos_device_available == 0
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: critical
+          category: availability
+        annotations:
+          summary: "Switch {{ $labels.device }} is down"
+          description: "Switch unavailable for more than one minute."
+
+      # Link down
+      - uid: link_down
+        title: "Link {{ $labels.link }} is DOWN"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: onos_link_up == 0
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 30s
+        labels:
+          severity: critical
+          category: topology
+        annotations:
+          summary: "Link {{ $labels.link }} is down"
+          description: "Link {{ $labels.src_device }}:{{ $labels.src_port }} → {{ $labels.dst_device }}:{{ $labels.dst_port }} is down."
+
+      # Flow table occupancy
+      - uid: flow_limit_exceeded
+        title: "Flow table usage high on {{ $labels.device }}"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: onos_device_flows > 1000
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: warning
+          category: capacity
+        annotations:
+          summary: "{{ $labels.device }} has {{ $value }} flows"
+          description: "Flow table usage exceeded configured threshold."
+
+      # Flow spike (delta)
+      - uid: flow_spike
+        title: "Flow spike on {{ $labels.device }}"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 120
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: onos_device_flows_delta > 500
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 30s
+        labels:
+          severity: warning
+          category: performance
+        annotations:
+          summary: "{{ $value }} new flows"
+          description: "A large number of flows were installed during the last monitoring interval."
+
+      # RX errors
+      - uid: rx_errors
+        title: "RX errors on {{ $labels.device }}:{{ $labels.port }}"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 120
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: onos_port_rx_errors_delta > 100
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 30s
+        labels:
+          severity: warning
+          category: errors
+        annotations:
+          summary: "RX errors detected"
+          description: "{{ $value }} new RX errors during the last monitoring interval."
+
+      # TX errors
+      - uid: tx_errors
+        title: "TX errors on {{ $labels.device }}:{{ $labels.port }}"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 120
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: onos_port_tx_errors_delta > 100
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 30s
+        labels:
+          severity: warning
+          category: errors
+        annotations:
+          summary: "TX errors detected"
+          description: "{{ $value }} new TX errors during the last monitoring interval."
+
+      # ==============================================================
+      # RX drops
+      # ==============================================================
+
+      - uid: rx_drops
+        title: "RX drops on {{ $labels.device }}:{{ $labels.port }}"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 120
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: onos_port_rx_dropped_delta > 500
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 30s
+        labels:
+          severity: warning
+          category: errors
+        annotations:
+          summary: "RX packet drops detected"
+          description: "{{ $value }} packets dropped during the last monitoring interval."
+
+      # TX drops
+      - uid: tx_drops
+        title: "TX drops on {{ $labels.device }}:{{ $labels.port }}"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 120
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: onos_port_tx_dropped_delta > 500
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 30s
+        labels:
+          severity: warning
+          category: errors
+        annotations:
+          summary: "TX packet drops detected"
+          description: "{{ $value }} packets dropped during the last monitoring interval."

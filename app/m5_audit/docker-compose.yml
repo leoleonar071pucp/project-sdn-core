@@ -1,0 +1,154 @@
+name: m5-observability
+
+services:
+
+  grafana:
+    image: grafana/grafana:13.0.1
+    container_name: m5-grafana
+    # restart: unless-stopped
+    ports:
+      - "3000:3000"
+
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin1
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+
+    depends_on:
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3000/api/health || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+    networks:
+      - observability
+
+  loki:
+    image: grafana/loki:3.5.5
+    container_name: m5-loki
+    # restart: unless-stopped
+    command:
+      - "-config.file=/etc/loki/config.yaml"
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki/config.yaml:/etc/loki/config.yaml # :ro
+      - loki-data:/loki
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3100/ready || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+    networks:
+      - observability
+
+  tempo:
+    image: grafana/tempo:2.9.2
+    container_name: m5-tempo
+    # restart: unless-stopped
+    command:
+      - "-config.file=/etc/tempo/tempo.yaml"
+    ports:
+      - "3200:3200"
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml # :ro
+      - tempo-data:/var/tempo
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3200/ready"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+    networks:
+      - observability
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: m5-prometheus
+    # restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+
+    networks:
+      - observability
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.144.0
+    container_name: m5-otel-collector
+    # restart: unless-stopped
+    command:
+      - "--config=/etc/otelcol/config.yaml"
+    ports:
+      - "4318:4318"
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol/config.yaml # :ro
+
+    depends_on:
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+
+    networks:
+      - observability
+
+  infra-monitoring:
+    build: ./infra-monitoring
+
+    container_name: m5-infra-monitoring
+
+    volumes:
+      - ./infra-monitoring:/app
+      - ./observability:/app/observability
+
+    environment:
+
+      COLLECTOR_HOST: otel-collector
+      COLLECTOR_PORT: 4318
+
+      ONOS_HOST: 192.168.201.200
+      ONOS_PORT: 8181
+
+      ONOS_USERNAME: onos
+      ONOS_PASSWORD: rocks
+    
+    depends_on:
+      otel-collector: 
+        condition: service_started
+
+    networks:
+      - observability
+
+#    restart: unless-stopped
+
+networks:
+
+  observability:
+    name: observability
+
+volumes:
+  grafana-data:
+  loki-data:
+  tempo-data:
+  prometheus-data:

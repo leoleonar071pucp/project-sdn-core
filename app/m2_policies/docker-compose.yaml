@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+
+  opa:
+    image: openpolicyagent/opa:0.68.0
+    container_name: m2-opa
+    network_mode: host 
+    volumes:
+      - ./opa/policy.rego:/workspace/policy.rego:ro
+    command: run --server --addr :8182 /workspace/policy.rego
+
+  sync:
+    build: ./sync
+    container_name: m2-sync
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      DB_HOST: localhost
+      DB_PORT: 3306
+      DB_NAME: radius_db
+      DB_USER: radius
+      DB_PASSWORD: radius_pass
+      OPA_URL: http://localhost:8182 
+      RESOURCES_SYNC_INTERVAL: 300
+      EXCEPTIONS_SYNC_INTERVAL: 30
+    depends_on:
+      opa:
+        condition: service_started
+        

@@ -1,0 +1,26 @@
+apiVersion: 1
+
+templates:
+  - orgId: 1
+    name: m6-webhook-template
+    template: |
+      {{ define "m6.port_traffic_stress" }}
+      {
+        "event": "{{ (index .Alerts 0).Labels.alert_type }}",
+        "status": "{{ .Status }}",
+
+        "device": "{{ (index .Alerts 0).Labels.device }}",
+        "port": "{{ (index .Alerts 0).Labels.port }}",
+
+        "severity": "{{ (index .Alerts 0).Labels.severity }}",
+        "category": "{{ (index .Alerts 0).Labels.category }}",
+
+        "metrics": {
+          "rx_bps": {{ index (index .Alerts 0).Values "A" }},
+          "tx_bps": {{ index (index .Alerts 0).Values "B" }}
+        },
+
+        "startsAt": "{{ (index .Alerts 0).StartsAt }}",
+        "endsAt": "{{ (index .Alerts 0).EndsAt }}"
+      }
+      {{ end }}

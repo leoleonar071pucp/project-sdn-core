@@ -1,0 +1,2 @@
+{"timestamp":"2026-06-22T10:20:30.000000+00:00","flow_id":101,"event_type":"alert","src_ip":"10.2.1.105","src_port":51515,"dest_ip":"10.0.0.30","dest_port":80,"proto":"TCP","alert":{"severity":2,"signature_id":9000002,"signature":"SDN DEMO possible SQL injection","category":"Web Application Attack"}}
+{"timestamp":"2026-06-22T10:20:31.000000+00:00","flow_id":102,"event_type":"tls","src_ip":"10.2.1.106","src_port":51516,"dest_ip":"10.0.0.40","dest_port":443,"proto":"TCP","tls":{"sni":"admin.example.edu","version":"TLS 1.3"}}
