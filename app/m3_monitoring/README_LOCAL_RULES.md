@@ -91,66 +91,6 @@ SDN DEMO Nmap NULL scan
 sid=9000009
 ```
 
-### 9000010 - TCP FIN Scan
-
-Detecta paquetes TCP con flag `FIN`.
-
-```bash
-sudo nmap -sF -Pn --max-retries 0 --host-timeout 20s -p 87,88,89 192.168.100.101
-```
-
-Resultado esperado:
-
-```text
-SDN DEMO Nmap FIN scan
-sid=9000010
-```
-
-### 9000027 - SSH Connection Attempt Burst
-
-Detecta varios intentos SYN hacia puerto `22`, aunque no haya servidor SSH real.
-
-```bash
-sudo hping3 -S -c 6 -i u100000 -p 22 192.168.100.101
-```
-
-Resultado esperado:
-
-```text
-SDN DEMO SSH connection attempt burst
-sid=9000027
-```
-
-### 9000028 - RDP Connection Attempt Burst
-
-Detecta varios intentos SYN hacia puerto `3389`, aunque no haya servidor RDP real.
-
-```bash
-sudo hping3 -S -c 6 -i u100000 -p 3389 192.168.100.101
-```
-
-Resultado esperado:
-
-```text
-SDN DEMO RDP connection attempt burst
-sid=9000028
-```
-
-### 9000029 - FTP Connection Attempt Burst
-
-Detecta varios intentos SYN hacia puerto `21`, aunque no haya servidor FTP real.
-
-```bash
-sudo hping3 -S -c 6 -i u100000 -p 21 192.168.100.101
-```
-
-Resultado esperado:
-
-```text
-SDN DEMO FTP connection attempt burst
-sid=9000029
-```
-
 ### 9000018 - ICMP Grande
 
 Detecta echo-request ICMP con payload grande.
@@ -294,45 +234,6 @@ Resultado esperado:
 ```text
 SDN DEMO RDP brute force attempt
 sid=9000012
-```
-
-### 9000026 - SSH Client Banner En Puerto No Estandar
-
-Requiere un servicio TCP escuchando en un puerto diferente de `22`.
-
-Ejemplo si existe un listener en `2222`:
-
-```bash
-python3 - <<'PY'
-import socket
-s = socket.create_connection(("192.168.100.101", 2222), timeout=3)
-s.sendall(b"SSH-2.0-SDN-test\r\n")
-s.close()
-PY
-```
-
-Resultado esperado:
-
-```text
-SDN DEMO SSH on non-standard port
-sid=9000026
-```
-
-### 9000037 - SSH Server Banner Desde Puerto No Estandar
-
-Requiere un servidor que responda con banner `SSH-` desde un puerto distinto de `22`.
-
-Ejemplo de cliente:
-
-```bash
-nc -v 192.168.100.101 2222
-```
-
-Resultado esperado:
-
-```text
-SDN DEMO SSH server banner from non-standard port
-sid=9000037
 ```
 
 ### 9000024 - HTTP En Puerto Inesperado

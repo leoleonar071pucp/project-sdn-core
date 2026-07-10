@@ -175,9 +175,9 @@ Por que T0:
 |---|---|---|
 | SQL injection | `9000002` | Drop TCP hacia IP:puerto del recurso. |
 | Path traversal | `9000014` | Drop TCP hacia IP:puerto del recurso. |
-| Port scan | `9000001`, `9000008`, `9000009`, `9000010` | Drop TCP hacia el destino escaneado. |
+| Port scan | `9000001`, `9000008`, `9000009` | Drop TCP hacia el destino escaneado. |
 | ICMP grande | `9000018` | Drop ICMP del host atacante. |
-| SSH/RDP/FTP burst | `9000027`, `9000028`, `9000029` | Drop TCP hacia ese puerto. |
+| SSH/RDP/FTP | `9000013`, `9000012`, `9000036` | Drop TCP hacia ese puerto. |
 | Estres de puerto | Evento M5/M4 de performance | Meter/rate-limit temporal en T0. |
 
 ## 9. Unmitigate
@@ -350,4 +350,3 @@ La separacion evita errores peligrosos:
 ```text
 Suricata ve, M4 decide, M6 castiga, ONOS aplica, M5 audita y DPDK ayuda a observar sin cargar el camino normal.
 ```
-

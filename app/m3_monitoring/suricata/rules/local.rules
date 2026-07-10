@@ -25,14 +25,11 @@ alert icmp any any -> $HOME_NET any (msg:"SDN DEMO possible ICMP tunneling - lar
 # 11. DNS Tunneling - Nombre de dominio muy largo (>52 chars)
 alert dns any any -> any any (msg:"SDN DEMO possible DNS tunneling - long domain"; dns.query; pcre:"/^[a-zA-Z0-9._-]{52,}/"; classtype:attempted-recon; priority:2; sid:9000015; rev:2;)
 
-# 12. SSH en puerto no estándar (ej. distinto de 22)
-alert tcp any any -> $HOME_NET any (msg:"SDN DEMO SSH on non-standard port"; flow:to_server, established; content:"SSH-"; depth:10; classtype:attempted-recon; priority:3; sid:9000026; rev:2;)
-
-# 13. ARP Spoofing (respuestas ARP no solicitadas)
+# 12. ARP Spoofing (respuestas ARP no solicitadas)
 alert arp any any -> any any (msg:"SDN DEMO possible ARP spoofing"; arp.opcode:2; threshold:type both, track by_src, count 3, seconds 5; classtype:attempted-recon; priority:2; sid:9000021; rev:3;)
 
-# 14. HTTP en puerto no estándar (ni 80, 8080 ni 443)
+# 13. HTTP en puerto no estándar (ni 80, 8080 ni 443)
 alert tcp any any -> $HOME_NET ![80,8080,443] (msg:"SDN DEMO HTTP on non-standard port"; flow:to_server, established; app-layer-protocol:http; classtype:attempted-recon; priority:3; sid:9000024; rev:2;)
 
-# 15. FTP Exfiltración (comando STOR en puerto 21)
+# 14. FTP Exfiltración (comando STOR en puerto 21)
 alert tcp any any -> $HOME_NET 21 (msg:"SDN DEMO possible FTP exfiltration"; flow:to_server, established; content:"STOR"; nocase; classtype:attempted-recon; priority:2; sid:9000036; rev:2;)

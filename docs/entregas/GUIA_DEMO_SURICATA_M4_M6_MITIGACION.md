@@ -130,11 +130,10 @@ before=200 exit=0
 | `9000001` | TCP SYN scan | `sudo nmap -sS -Pn --max-retries 0 --host-timeout 20s -p 1-40 192.168.100.101` | `block_tcp_to_dest`, TTL `300s`: drop T0 `tcp`, `src_ip=host`, `dst_ip=192.168.100.101` | Todo TCP del host hacia `192.168.100.101`, no solo los puertos escaneados |
 | `9000008` | XMAS scan | `sudo nmap -sX -Pn --max-retries 0 --host-timeout 20s -p 81,82,83 192.168.100.101` | `block_tcp_to_dest`, TTL `300s`: drop T0 `tcp`, `src_ip=host`, `dst_ip=192.168.100.101` | Todo TCP del host hacia `192.168.100.101` |
 | `9000009` | NULL scan | `sudo nmap -sN -Pn --max-retries 0 --host-timeout 20s -p 84,85,86 192.168.100.101` | `block_tcp_to_dest`, TTL `300s`: drop T0 `tcp`, `src_ip=host`, `dst_ip=192.168.100.101` | Todo TCP del host hacia `192.168.100.101` |
-| `9000010` | FIN scan | `sudo nmap -sF -Pn --max-retries 0 --host-timeout 20s -p 87,88,89 192.168.100.101` | `block_tcp_to_dest`, TTL `300s`: drop T0 `tcp`, `src_ip=host`, `dst_ip=192.168.100.101` | Todo TCP del host hacia `192.168.100.101` |
-| `9000027` | Intentos/burst SSH | `sudo hping3 -S -c 6 -i u100000 -p 22 192.168.100.101` | `block_tcp_port`, TTL `600s`: drop T0 `tcp`, `src_ip=host`, `tcp_dst=22` | SSH del host hacia cualquier destino |
-| `9000028` | Intentos/burst RDP | `sudo hping3 -S -c 6 -i u100000 -p 3389 192.168.100.101` | `block_tcp_port`, TTL `600s`: drop T0 `tcp`, `src_ip=host`, `tcp_dst=3389` | RDP del host hacia cualquier destino |
-| `9000029` | Intentos/burst FTP | `sudo hping3 -S -c 6 -i u100000 -p 21 192.168.100.101` | `block_tcp_port`, TTL `600s`: drop T0 `tcp`, `src_ip=host`, `tcp_dst=21` | FTP del host hacia cualquier destino |
 | `9000018` | ICMP con payload grande | `ping -c 6 -s 700 192.168.100.101` | `block_icmp`, TTL `600s`: drop T0 `icmp`, `src_ip=host` | Ping/ICMP saliente del host |
+| `9000013` | SSH brute force establecido | Requiere servidor SSH real en TCP/22 | `block_tcp_port`, TTL `900s`: drop T0 `tcp`, `src_ip=host`, `tcp_dst=22` | SSH del host hacia cualquier destino |
+| `9000012` | RDP brute force establecido | Requiere servidor RDP real en TCP/3389 | `block_tcp_port`, TTL `900s`: drop T0 `tcp`, `src_ip=host`, `tcp_dst=3389` | RDP del host hacia cualquier destino |
+| `9000036` | FTP STOR/exfiltration | Requiere servidor FTP real con subida | `block_tcp_port`, TTL `900s`: drop T0 `tcp`, `src_ip=host`, `tcp_dst=21` | FTP del host hacia cualquier destino |
 
 La columna `Login` separa deteccion de mitigacion:
 
@@ -284,7 +283,7 @@ blocked_scan_http=000 exit=28
 blocked_scan_https=000 exit=28
 ```
 
-### 4.4 XMAS, NULL y FIN scans - `sid=9000008/9000009/9000010`
+### 4.4 XMAS y NULL scans - `sid=9000008/9000009`
 
 Descripcion: variantes de escaneo TCP con flags inusuales. La mitigacion es la
 misma que para SYN scan: bloquear TCP hacia el destino completo.
@@ -303,17 +302,10 @@ sudo nmap -sN -Pn --max-retries 0 --host-timeout 20s \
   -p 84,85,86 192.168.100.101
 ```
 
-Activar FIN:
-
-```bash
-sudo nmap -sF -Pn --max-retries 0 --host-timeout 20s \
-  -p 87,88,89 192.168.100.101
-```
-
 Mitigacion esperada:
 
 ```text
-sid=9000008 o 9000009 o 9000010
+sid=9000008 o 9000009
 mitigation_action=block_tcp_to_dest
 TTL=300s
 drop T0: tcp + src_ip=192.168.100.55 + dst_ip=192.168.100.101
@@ -333,55 +325,37 @@ Esperado:
 blocked_tcp_dest=000 exit=28
 ```
 
-### 4.5 SSH/RDP/FTP bursts - `sid=9000027/9000028/9000029`
+### 4.5 SSH/RDP/FTP establecidos - `sid=9000013/9000012/9000036`
 
-Descripcion: simula intentos repetidos a puertos administrativos o de servicio.
-La mitigacion bloquea ese puerto TCP para el host atacante, hacia cualquier
-destino.
+Descripcion: estas reglas requieren una conexion TCP establecida con servicios
+reales. No se recomiendan como demo principal si no hay servidor SSH/RDP/FTP
+levantado.
 
-Activar SSH:
+SSH brute force:
 
 ```bash
-sudo hping3 -S -c 6 -i u100000 -p 22 192.168.100.101
+requiere servidor SSH real aceptando TCP/22
 ```
 
-Luego SSH ya no deberia salir desde H1:
+RDP brute force:
 
 ```bash
-nc -vz -w 3 192.168.100.101 22 || true
+requiere servidor RDP real aceptando TCP/3389
 ```
 
-Activar RDP:
+FTP STOR/exfiltration:
 
 ```bash
-sudo hping3 -S -c 6 -i u100000 -p 3389 192.168.100.101
-```
-
-Luego RDP ya no deberia salir desde H1:
-
-```bash
-nc -vz -w 3 192.168.100.101 3389 || true
-```
-
-Activar FTP:
-
-```bash
-sudo hping3 -S -c 6 -i u100000 -p 21 192.168.100.101
-```
-
-Luego FTP ya no deberia salir desde H1:
-
-```bash
-nc -vz -w 3 192.168.100.101 21 || true
+requiere servidor FTP real y comando STOR
 ```
 
 Mitigacion esperada:
 
 ```text
-sid=9000027 -> block_tcp_port tcp_dst=22
-sid=9000028 -> block_tcp_port tcp_dst=3389
-sid=9000029 -> block_tcp_port tcp_dst=21
-TTL=600s
+sid=9000013 -> block_tcp_port tcp_dst=22
+sid=9000012 -> block_tcp_port tcp_dst=3389
+sid=9000036 -> block_tcp_port tcp_dst=21
+TTL=900s
 drop T0: tcp + src_ip=192.168.100.55 + tcp_dst=PUERTO
 ```
 
@@ -655,8 +629,6 @@ real o trafico adicional:
 | `9000013` | SSH brute force established | Servidor SSH real aceptando TCP/22 |
 | `9000012` | RDP brute force established | Servidor RDP real TCP/3389 |
 | `9000015` | DNS tunneling | Que UDP/53 sea visible por el mirror |
-| `9000026` | SSH client banner puerto no estandar | Listener TCP en puerto no 22 |
-| `9000037` | SSH server banner puerto no estandar | Servidor que responda `SSH-` en puerto no 22 |
 | `9000024` | HTTP puerto inesperado | Servidor HTTP en puerto no academico, por ejemplo 9090 |
 | `9000036` | FTP STOR/exfiltration | Servidor FTP real con subida |
 | `9000021` | ARP spoofing | Desactivada; Suricata rechazo la firma ARP en esta configuracion |

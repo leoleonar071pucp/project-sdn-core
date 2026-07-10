@@ -232,13 +232,14 @@ Ejemplos:
 | `9000001` | `port_scan` | `50` |
 | `9000008` | `port_scan` | `50` |
 | `9000009` | `port_scan` | `50` |
-| `9000010` | `port_scan` | `50` |
 | `9000002` | `web_attack` | `70` |
 | `9000014` | `web_attack` | `70` |
-| `9000018` | `suricata_medium` | `45` |
-| `9000027` | `suricata_medium` | `50` |
-| `9000028` | `suricata_medium` | `50` |
-| `9000029` | `suricata_medium` | `50` |
+| `9000018` | `icmp_large_payload` | `55` |
+| `9000015` | `suricata_high` | `70` |
+| `9000013` | `suricata_high` | `70` |
+| `9000012` | `suricata_high` | `70` |
+| `9000024` | `suricata_medium` | `50` |
+| `9000036` | `suricata_high` | `70` |
 
 Si llega un SID desconocido, M4 usa la severidad nativa de Suricata para
 clasificarlo.
