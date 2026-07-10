@@ -247,6 +247,22 @@ grep "security_mitigation_applied" /tmp/m6.log | tail -10
 
 # Ver incidentes en M4 (desde monitoring)
 sudo docker logs m4-security 2>&1 | tail -20
+
+#ver incidentes en suricata:
+tail -f /home/ubuntu/project-sdn-core/app/m3_monitoring/logs/eve.json | grep --line-buffered '"event_type":"alert"' | python3 -c "
+import sys,json
+for line in sys.stdin:
+ try:
+  e=json.loads(line); a=e.get('alert',{})
+  print(f'SID={a.get(\"signature_id\")} SRC={e.get(\"src_ip\")} >> {a.get(\"signature\")}')
+ except: pass
+"
+#levantar dashboard
+ssh -L 8088:192.168.201.251:8080 -p 5851 ubuntu@10.20.11.32
+
+#url
+http://127.0.0.1:8088/m6/dashboard
+
 ```
 
 ---
