@@ -114,6 +114,10 @@ class IncidentManager:
     def mark_expired(self, incident: SecurityIncident) -> SecurityIncident:
         incident.state = IncidentState.EXPIRED
         incident.last_action_fingerprint = None
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for item in incident.action_history:
+            if item.get("status") == ActionStatus.EXECUTED.value:
+                item["expires_at"] = now_iso
         incident.updated_at = datetime.now(timezone.utc)
         return incident
 

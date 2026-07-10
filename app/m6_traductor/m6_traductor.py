@@ -299,6 +299,11 @@ class Config:
         9000012: {"action": "block_tcp_port", "ttl": 900, "dst_port": 3389},
         9000024: {"action": "block_tcp_to_dest_port", "ttl": 900},
         9000036: {"action": "block_tcp_port", "ttl": 900, "dst_port": 21},
+        # OWASP Top 10 / ataques sofisticados
+        9000050: {"action": "block_tcp_to_dest_port", "ttl": 900},   # Spring4Shell RCE (A06)
+        9000051: {"action": "block_tcp_to_dest_port", "ttl": 900},   # XSS Reflected (A03)
+        9000052: {"action": "block_tcp_to_dest_port", "ttl": 900},   # SSRF (A10)
+        9000053: {"action": "block_tcp_to_dest_port", "ttl": 900},   # Command Injection (A03)
     }
 
     # VLANs por rol
@@ -1258,7 +1263,7 @@ class ONOSClient:
     def get_devices(self):
         """Lista de deviceIds disponibles en ONOS."""
         if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
-            return [Config.SW1, Config.SW2, Config.SW3]
+            return list(Config.DPID_MAP.keys())
         try:
             resp = requests.get(
                 f"{self.url}/onos/v1/devices", auth=self.auth, timeout=5
