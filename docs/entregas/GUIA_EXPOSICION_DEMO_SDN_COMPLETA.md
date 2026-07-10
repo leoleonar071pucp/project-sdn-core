@@ -310,46 +310,24 @@ curl -sS --max-time 8 -X POST \
 
 Esta demo no depende de Suricata. M6 mira contadores de ONOS, detecta PPS alto y aplica meter temporal.
 
-### 6.1 Dejar M6 En Perfil Demo
+### 6.1 Ver Que El Monitor Esta Activo
 
 En AAA:
 
 ```bash
 ssh -p 5851 ubuntu@10.20.11.32
-fuser -k 8080/tcp || true
-sleep 2
-
-NETWORK_ACTIONS_ENABLED=true \
-ONOS_READS_ENABLED=true \
-ONOS_WRITES_ENABLED=true \
-MYSQL_SECURITY_READS_ENABLED=true \
-STARTUP_FLOW_INSTALL_ENABLED=false \
-REACTIVE_DATA_FLOWS_ENABLED=true \
-SESSION_EXPIRE_ON_T1_REMOVED=true \
-SESSION_IDLE_TIMEOUT=5400 \
-DATA_FLOW_TIMEOUT=300 \
-M6_SELF_MONITOR_ENABLED=true \
-M6_SELF_MONITOR_ACTIONS=true \
-M6_SELF_MONITOR_THRESHOLD_PPS=300 \
-M6_SELF_MONITOR_REQUIRED_SAMPLES=1 \
-M6_SELF_MONITOR_METER_PPS=50 \
-M6_SELF_MONITOR_TTL=300 \
-M6_SELF_MONITOR_PORTS='of:00006a0757adfc4e:1,2,3' \
-nohup python3 -u /home/ubuntu/m6_traductor.py \
-  > /home/ubuntu/logs/m6_self_monitor_demo300.log 2>&1 &
-
-sleep 4
 curl -sS --max-time 8 http://127.0.0.1:8080/m6/status | python3 -m json.tool
 ```
 
-Verificar:
+Esperado:
 
 ```text
+self_monitor.running: true
 self_monitor.actions_enabled: true
 self_monitor.threshold_pps: 300
 ```
 
-### 6.2 Ejecutar Script En H1
+### 6.2 Ejecutar Ataque De Ruido En H1
 
 El script debe existir en:
 
@@ -382,6 +360,7 @@ chmod +x /home/ubuntu/demo_ddos_curl.sh
 Ejecutar:
 
 ```bash
+ssh -p 5811 ubuntu@10.20.11.32
 /home/ubuntu/demo_ddos_curl.sh http://192.168.100.101:8001/ 20 40
 ```
 
@@ -390,6 +369,14 @@ En la prueba real esto genero:
 ```text
 pps: 1491.34
 threshold_pps: 300
+```
+
+Explicacion corta para la expo:
+
+```text
+H1 genera muchas conexiones HTTP.
+M6 ve por ONOS que el puerto de H1 supera el umbral.
+M6 instala un meter temporal en T0 de SW4 para limitar ese puerto.
 ```
 
 ### 6.3 Ver Meter En M6
@@ -467,46 +454,9 @@ rate_limits: []
 
 Objetivo: demostrar que si cae SW2 o SW3, la sesion no se borra y M6 puede recalcular/reinstalar flows si existe ruta alternativa.
 
-### 7.1 Preparar M6 Para Failover Automatico
+Nota: el comando de H1 de la demo DDoS **no tumba SW2/SW3**. Ese comando solo genera trafico para activar un meter. Para demostrar caida de switches se usan comandos en SW2 o SW3.
 
-En AAA, si quieres mostrar recuperacion automatica real:
-
-```bash
-fuser -k 8080/tcp || true
-sleep 2
-
-NETWORK_ACTIONS_ENABLED=true \
-ONOS_READS_ENABLED=true \
-ONOS_WRITES_ENABLED=true \
-MYSQL_SECURITY_READS_ENABLED=true \
-STARTUP_FLOW_INSTALL_ENABLED=false \
-REACTIVE_DATA_FLOWS_ENABLED=true \
-SESSION_EXPIRE_ON_T1_REMOVED=true \
-SESSION_IDLE_TIMEOUT=5400 \
-DATA_FLOW_TIMEOUT=300 \
-FAILOVER_ANALYSIS_ENABLED=true \
-FAILOVER_AUTO_REINSTALL_ENABLED=true \
-FAILOVER_RECOVERY_COOLDOWN=10 \
-FAILOVER_RECOVERY_MAX_SESSIONS=20 \
-FAILOVER_EVENT_DEDUP_WINDOW=15 \
-M6_SELF_MONITOR_ENABLED=true \
-M6_SELF_MONITOR_ACTIONS=false \
-M6_SELF_MONITOR_THRESHOLD_PPS=500 \
-nohup python3 -u /home/ubuntu/m6_traductor.py \
-  > /home/ubuntu/logs/m6_failover_demo.log 2>&1 &
-
-sleep 4
-curl -sS http://127.0.0.1:8080/m6/status | python3 -m json.tool
-```
-
-Verificar:
-
-```text
-failover_analysis_enabled: true
-failover_auto_reinstall_enabled: true
-```
-
-### 7.2 Ver Topologia En M6
+### 7.1 Ver Topologia Antes De Tumbar
 
 En AAA:
 
@@ -528,7 +478,7 @@ Vista sugerida:
 Failover / Topologia
 ```
 
-### 7.2.1 Como Funciona El Dashboard De Failover
+### 7.2 Como Funciona El Dashboard De Failover
 
 En la vista **Failover** del dashboard de M6 hay dos botones importantes:
 
@@ -556,7 +506,7 @@ Para recuperacion real automatica se necesita:
 
 ```text
 ONOS detecta evento real -> topology-events -> M6 /m6/failover/event
-FAILOVER_AUTO_REINSTALL_ENABLED=true
+M6 recibe el evento, analiza sesiones afectadas y reinstala por ruta alternativa si existe.
 ```
 
 Por seguridad de exposicion, el dashboard debe usarse solo con:
@@ -577,12 +527,38 @@ No usar como demo real:
 Resumen para explicar al profesor:
 
 ```text
-El dashboard simula y analiza. La caida fisica controlada de SW2/SW3 se hace por terminal con rollback automatico.
+El dashboard analiza y muestra impacto.
+La caida real controlada de SW2/SW3 se hace por terminal.
 ```
 
-### 7.3 Prueba SW2
+### 7.3 Mantener H1 Probando Acceso
 
-En SW2:
+Antes de tumbar un switch, deja este comando corriendo en H1. Sirve para demostrar que el usuario sigue autenticado y que el curso vuelve a responder sin relogin.
+
+En H1:
+
+```bash
+ssh -p 5811 ubuntu@10.20.11.32
+for i in $(seq 1 12); do
+  date -Is
+  curl -sS --max-time 5 -o /dev/null \
+    -w 'h1_8001 http=%{http_code} exit=%{exitcode} time=%{time_total}\n' \
+    http://192.168.100.101:8001/ || true
+  sleep 5
+done
+```
+
+Esperado:
+
+```text
+Antes de la caida: http=200.
+Durante la convergencia: puede aparecer 1 timeout.
+Despues: vuelve a http=200 sin ejecutar login otra vez.
+```
+
+### 7.4 Tumbar SW2 Con Rollback Automatico
+
+En otra terminal, en SW2:
 
 ```bash
 ssh -p 5802 ubuntu@10.20.11.32
@@ -606,23 +582,17 @@ nohup /tmp/sw2_failover_safe_test.sh >/dev/null 2>&1 &
 
 No toca `ens3`.
 
-Mientras tanto, desde H1:
+Demostrar que SW2 bajo:
 
 ```bash
-for i in $(seq 1 9); do
-  date -Is
-  curl -sS --max-time 5 -o /dev/null \
-    -w 'h1_8001 http=%{http_code} exit=%{exitcode} time=%{time_total}\n' \
-    http://192.168.100.101:8001/ || true
-  sleep 5
-done
+sudo ovs-ofctl -O OpenFlow13 show sw2 | egrep 'ens4|ens5|ens6|ens7'
 ```
 
 Esperado:
 
 ```text
-Puede haber 1 timeout durante convergencia.
-Luego vuelve a 200 sin reloguear.
+ens4/ens5/ens6/ens7 aparecen DOWN durante unos segundos.
+Luego el script los sube automaticamente.
 ```
 
 Ver log de SW2:
@@ -632,9 +602,9 @@ cat /tmp/sw2_failover_safe_test.log
 sudo ovs-ofctl -O OpenFlow13 show sw2 | egrep 'ens4|ens5|ens6|ens7'
 ```
 
-### 7.4 Prueba SW3
+### 7.5 Tumbar SW3 Con Rollback Automatico
 
-En SW3:
+En otra terminal, en SW3:
 
 ```bash
 ssh -p 5803 ubuntu@10.20.11.32
@@ -656,28 +626,30 @@ chmod +x /tmp/sw3_failover_safe_test.sh
 nohup /tmp/sw3_failover_safe_test.sh >/dev/null 2>&1 &
 ```
 
-Desde H1:
+Demostrar que SW3 bajo:
 
 ```bash
-for i in $(seq 1 9); do
-  date -Is
-  curl -sS --max-time 5 -o /dev/null \
-    -w 'h1_8001 http=%{http_code} exit=%{exitcode} time=%{time_total}\n' \
-    http://192.168.100.101:8001/ || true
-  sleep 5
-done
+sudo ovs-ofctl -O OpenFlow13 show sw3 | egrep 'ens4|ens5|ens6|ens7'
 ```
 
-### 7.5 Ver Logs De M6
+Mientras tanto, mira la terminal de H1 del paso 7.3. Lo que quieres mostrar es:
+
+```text
+La sesion no se borra.
+No se vuelve a ejecutar cli.py.
+El acceso al recurso vuelve a 200 cuando M6/ONOS reconvergen.
+```
+
+### 7.6 Ver Logs De M6
 
 En AAA:
 
 ```bash
-grep -nE 'failover|FAILOVER|recover|reinstall|GRE|gre|SW2|SW3' \
-  /home/ubuntu/logs/m6_failover_demo.log | tail -n 120
+grep -nE 'failover|FAILOVER|recover|reinstall|GRE|gre|SW2|SW3|link|device' \
+  /home/ubuntu/logs/m6_*.log /home/ubuntu/m6_traductor.log 2>/dev/null | tail -n 120
 ```
 
-### 7.6 Reasegurar GRE Despues Del Failover
+### 7.7 Reasegurar GRE Despues Del Failover
 
 En AAA:
 
@@ -737,32 +709,7 @@ for p in ens4 ens5 ens6 ens7; do
 done
 ```
 
-### 8.3 Dejar M6 En Modo Seguro
-
-En AAA:
-
-```bash
-fuser -k 8080/tcp || true
-sleep 2
-
-NETWORK_ACTIONS_ENABLED=true \
-ONOS_READS_ENABLED=true \
-ONOS_WRITES_ENABLED=true \
-MYSQL_SECURITY_READS_ENABLED=true \
-STARTUP_FLOW_INSTALL_ENABLED=false \
-REACTIVE_DATA_FLOWS_ENABLED=true \
-SESSION_EXPIRE_ON_T1_REMOVED=true \
-SESSION_IDLE_TIMEOUT=5400 \
-DATA_FLOW_TIMEOUT=300 \
-M6_SELF_MONITOR_ENABLED=true \
-M6_SELF_MONITOR_ACTIONS=false \
-M6_SELF_MONITOR_THRESHOLD_PPS=500 \
-M6_SELF_MONITOR_REQUIRED_SAMPLES=2 \
-nohup python3 -u /home/ubuntu/m6_traductor.py \
-  > /home/ubuntu/logs/m6_self_monitor.log 2>&1 &
-```
-
-### 8.4 Verificar Limpio
+### 8.3 Verificar Limpio
 
 En AAA:
 
