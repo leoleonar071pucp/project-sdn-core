@@ -281,6 +281,36 @@ class Config:
     PRIO_T0_RATE_LIMIT = 38900  # T0: meter temporal por saturacion/M5
     RATE_LIMIT_DEFAULT_TTL = int(os.getenv("RATE_LIMIT_DEFAULT_TTL", "300"))
     RATE_LIMIT_DEFAULT_PPS = int(os.getenv("RATE_LIMIT_DEFAULT_PPS", "50"))
+    M6_SELF_MONITOR_ENABLED = env_bool.__func__(
+        "M6_SELF_MONITOR_ENABLED", False
+    )
+    M6_SELF_MONITOR_ACTIONS = env_bool.__func__(
+        "M6_SELF_MONITOR_ACTIONS", False
+    )
+    M6_SELF_MONITOR_INTERVAL = int(os.getenv("M6_SELF_MONITOR_INTERVAL", "10"))
+    M6_SELF_MONITOR_THRESHOLD_PPS = int(os.getenv(
+        "M6_SELF_MONITOR_THRESHOLD_PPS", "500"
+    ))
+    M6_SELF_MONITOR_METER_PPS = int(os.getenv(
+        "M6_SELF_MONITOR_METER_PPS", "50"
+    ))
+    M6_SELF_MONITOR_TTL = int(os.getenv("M6_SELF_MONITOR_TTL", "300"))
+    M6_SELF_MONITOR_REQUIRED_SAMPLES = int(os.getenv(
+        "M6_SELF_MONITOR_REQUIRED_SAMPLES", "2"
+    ))
+    M6_SELF_MONITOR_COOLDOWN = int(os.getenv(
+        "M6_SELF_MONITOR_COOLDOWN", "300"
+    ))
+    M6_SELF_MONITOR_MAX_PORTS = int(os.getenv(
+        "M6_SELF_MONITOR_MAX_PORTS", "20"
+    ))
+    M6_SELF_MONITOR_MAX_ACTIONS_PER_MINUTE = int(os.getenv(
+        "M6_SELF_MONITOR_MAX_ACTIONS_PER_MINUTE", "5"
+    ))
+    M6_SELF_MONITOR_PORTS = os.getenv(
+        "M6_SELF_MONITOR_PORTS",
+        "of:00006a0757adfc4e:1,2,3",
+    )
     DATA_FLOW_TIMEOUT = int(os.getenv("DATA_FLOW_TIMEOUT", "300"))
 
     SECURITY_MITIGATION_POLICIES = {
@@ -1504,6 +1534,80 @@ class ONOSClient:
             print(f"  [ONOS] Error GET /meters/{device_id}: {exc}")
         return []
 
+    def get_port_statistics(self, device_id=None):
+        """Lee contadores de puertos desde ONOS para deteccion liviana de estres."""
+        if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
+            return []
+        endpoint = (
+            f"{self.url}/onos/v1/statistics/ports/{device_id}"
+            if device_id else f"{self.url}/onos/v1/statistics/ports"
+        )
+        try:
+            resp = requests.get(endpoint, auth=self.auth, timeout=4)
+            if resp.status_code != 200:
+                print(f"  [ONOS] Error GET statistics/ports: HTTP {resp.status_code}")
+                return []
+            data = resp.json()
+        except Exception as exc:
+            print(f"  [ONOS] Error GET statistics/ports: {exc}")
+            return []
+
+        raw_items = data.get("statistics") or data.get("ports") or []
+        if isinstance(raw_items, dict):
+            raw_items = [raw_items]
+        elif not isinstance(raw_items, list):
+            raw_items = [data] if isinstance(data, dict) else []
+        normalized = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            dev = (
+                item.get("device")
+                or item.get("deviceId")
+                or item.get("elementId")
+                or device_id
+            )
+            ports = item.get("ports") if isinstance(item.get("ports"), list) else None
+            if ports is None:
+                ports = [item]
+            for port in ports:
+                port_no = (
+                    port.get("port")
+                    or port.get("portNumber")
+                    or port.get("portNo")
+                )
+                if dev is None or port_no is None:
+                    continue
+                normalized.append({
+                    "device": str(dev),
+                    "port": str(port_no),
+                    "packets_received": self._stat_int(
+                        port, "packetsReceived", "packets_received", "rxPackets"
+                    ),
+                    "packets_sent": self._stat_int(
+                        port, "packetsSent", "packets_sent", "txPackets"
+                    ),
+                    "bytes_received": self._stat_int(
+                        port, "bytesReceived", "bytes_received", "rxBytes"
+                    ),
+                    "bytes_sent": self._stat_int(
+                        port, "bytesSent", "bytes_sent", "txBytes"
+                    ),
+                    "raw": port,
+                })
+        return normalized
+
+    @staticmethod
+    def _stat_int(source, *keys):
+        for key in keys:
+            value = source.get(key)
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return 0
+        return 0
+
     def get_flows(self, device_id):
         """Devuelve flows crudas de un device ONOS."""
         if not (Config.NETWORK_ACTIONS_ENABLED and Config.ONOS_READS_ENABLED):
@@ -1543,6 +1647,13 @@ class M6Translator:
         self._packet_in_seen = {}
         self._failover_recovery_seen = {}
         self._failover_event_seen = {}
+        self._self_monitor_last = {}
+        self._self_monitor_hits = defaultdict(int)
+        self._self_monitor_cooldown = {}
+        self._self_monitor_actions = deque()
+        self._self_monitor_events = deque(maxlen=100)
+        self._self_monitor_stop = threading.Event()
+        self._self_monitor_thread = None
 
     def _flow_debug(self, flow_entry):
         selector = flow_entry.get("selector", {}).get("criteria", [])
@@ -4319,6 +4430,275 @@ class M6Translator:
     def _rate_limit_key(device_id, port, event):
         return f"{device_id}:{int(port)}:{event or 'port_traffic_stress'}"
 
+    def _self_monitor_ports(self):
+        allowed = []
+        for item in str(Config.M6_SELF_MONITOR_PORTS or "").split(";"):
+            item = item.strip()
+            if not item or ":" not in item:
+                continue
+            device_id, ports_raw = item.rsplit(":", 1)
+            for port_raw in ports_raw.split(","):
+                port_raw = port_raw.strip()
+                if not port_raw:
+                    continue
+                try:
+                    port = int(port_raw)
+                except ValueError:
+                    continue
+                if port <= 0:
+                    continue
+                allowed.append((device_id, port))
+                if len(allowed) >= Config.M6_SELF_MONITOR_MAX_PORTS:
+                    return allowed
+        return allowed
+
+    def _self_monitor_config(self):
+        return {
+            "enabled": Config.M6_SELF_MONITOR_ENABLED,
+            "actions_enabled": Config.M6_SELF_MONITOR_ACTIONS,
+            "interval_seconds": Config.M6_SELF_MONITOR_INTERVAL,
+            "threshold_pps": Config.M6_SELF_MONITOR_THRESHOLD_PPS,
+            "meter_pps": Config.M6_SELF_MONITOR_METER_PPS,
+            "ttl_seconds": Config.M6_SELF_MONITOR_TTL,
+            "required_samples": Config.M6_SELF_MONITOR_REQUIRED_SAMPLES,
+            "cooldown_seconds": Config.M6_SELF_MONITOR_COOLDOWN,
+            "max_ports": Config.M6_SELF_MONITOR_MAX_PORTS,
+            "max_actions_per_minute": (
+                Config.M6_SELF_MONITOR_MAX_ACTIONS_PER_MINUTE
+            ),
+            "ports": [
+                {
+                    "device": dev,
+                    "device_name": Config.SWITCH_NOMBRES.get(dev, dev),
+                    "port": port,
+                }
+                for dev, port in self._self_monitor_ports()
+            ],
+        }
+
+    def _self_monitor_action_allowed(self, now_ts):
+        window = 60
+        cutoff = now_ts - window
+        with self._lock:
+            while self._self_monitor_actions and self._self_monitor_actions[0] < cutoff:
+                self._self_monitor_actions.popleft()
+            if (
+                len(self._self_monitor_actions)
+                >= Config.M6_SELF_MONITOR_MAX_ACTIONS_PER_MINUTE
+            ):
+                return False
+            self._self_monitor_actions.append(now_ts)
+        return True
+
+    def self_monitor_run_once(self, reason="manual"):
+        now = time.time()
+        allowed = set(self._self_monitor_ports())
+        if not allowed:
+            return {
+                "ok": False,
+                "error": "no hay puertos configurados para self-monitor",
+                "config": self._self_monitor_config(),
+            }
+        devices = sorted({dev for dev, _port in allowed})
+        samples = []
+        events = []
+
+        for device_id in devices:
+            for stat in self.onos.get_port_statistics(device_id):
+                try:
+                    port = int(stat.get("port"))
+                except (TypeError, ValueError):
+                    continue
+                key = (stat.get("device") or device_id, port)
+                if key not in allowed:
+                    continue
+                total_packets = (
+                    int(stat.get("packets_received") or 0)
+                    + int(stat.get("packets_sent") or 0)
+                )
+                total_bytes = (
+                    int(stat.get("bytes_received") or 0)
+                    + int(stat.get("bytes_sent") or 0)
+                )
+                previous = self._self_monitor_last.get(key)
+                sample = {
+                    "device": key[0],
+                    "device_name": Config.SWITCH_NOMBRES.get(key[0], key[0]),
+                    "port": port,
+                    "packets": total_packets,
+                    "bytes": total_bytes,
+                    "pps": None,
+                    "bps": None,
+                    "status": "warming_up",
+                }
+                if previous:
+                    elapsed = max(now - previous["ts"], 0.001)
+                    delta_packets = max(total_packets - previous["packets"], 0)
+                    delta_bytes = max(total_bytes - previous["bytes"], 0)
+                    pps = delta_packets / elapsed
+                    bps = (delta_bytes * 8) / elapsed
+                    sample.update({
+                        "pps": round(pps, 2),
+                        "bps": round(bps, 2),
+                        "delta_packets": delta_packets,
+                        "delta_bytes": delta_bytes,
+                        "elapsed_seconds": round(elapsed, 3),
+                    })
+                    if pps > Config.M6_SELF_MONITOR_THRESHOLD_PPS:
+                        self._self_monitor_hits[key] += 1
+                        sample["status"] = "above_threshold"
+                    else:
+                        self._self_monitor_hits[key] = 0
+                        sample["status"] = "ok"
+
+                    if (
+                        self._self_monitor_hits[key]
+                        >= Config.M6_SELF_MONITOR_REQUIRED_SAMPLES
+                    ):
+                        cooldown_until = self._self_monitor_cooldown.get(key, 0)
+                        if cooldown_until > now:
+                            sample["status"] = "cooldown"
+                            sample["cooldown_remaining_seconds"] = int(
+                                cooldown_until - now
+                            )
+                        else:
+                            event = self._self_monitor_handle_stress(
+                                key[0], port, sample, now, reason
+                            )
+                            sample["status"] = event.get("status", "detected")
+                            events.append(event)
+
+                self._self_monitor_last[key] = {
+                    "ts": now,
+                    "packets": total_packets,
+                    "bytes": total_bytes,
+                }
+                samples.append(sample)
+
+        result = {
+            "ok": True,
+            "reason": reason,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "config": self._self_monitor_config(),
+            "samples": samples,
+            "events": events,
+        }
+        with self._lock:
+            self._self_monitor_events.append(result)
+        return result
+
+    def _self_monitor_handle_stress(self, device_id, port, sample, now, reason):
+        event = {
+            "event": "port_traffic_stress",
+            "status": "firing",
+            "device": device_id,
+            "port": str(port),
+            "severity": "warning",
+            "category": "performance",
+            "metrics": {
+                "pps": sample.get("pps"),
+                "bps": sample.get("bps"),
+                "threshold_pps": Config.M6_SELF_MONITOR_THRESHOLD_PPS,
+            },
+            "startsAt": datetime.now(timezone.utc).isoformat(),
+            "ttl_seconds": Config.M6_SELF_MONITOR_TTL,
+            "meter_rate": Config.M6_SELF_MONITOR_METER_PPS,
+            "source": "m6_self_monitor",
+            "reason": reason,
+        }
+        if not Config.M6_SELF_MONITOR_ACTIONS:
+            self._self_monitor_cooldown[(device_id, int(port))] = (
+                now + Config.M6_SELF_MONITOR_COOLDOWN
+            )
+            self._self_monitor_hits[(device_id, int(port))] = 0
+            event.update({
+                "ok": True,
+                "status": "simulated",
+                "message": "self-monitor detecto estres; acciones desactivadas",
+            })
+            self.logger.log({
+                "modulo": "M6",
+                "evento": "self_monitor_stress_simulated",
+                "device": device_id,
+                "port": port,
+                "pps": sample.get("pps"),
+                "threshold_pps": Config.M6_SELF_MONITOR_THRESHOLD_PPS,
+            })
+            return event
+
+        if not self._self_monitor_action_allowed(now):
+            event.update({
+                "ok": False,
+                "status": "action_rate_limited",
+                "message": "limite de acciones self-monitor por minuto alcanzado",
+            })
+            return event
+
+        result = self.procesar_rate_limit_event(event)
+        event.update({
+            "ok": bool(result.get("ok")),
+            "status": result.get("status", "mitigation_failed"),
+            "rate_limit": result,
+        })
+        if result.get("ok"):
+            self._self_monitor_cooldown[(device_id, int(port))] = (
+                now + Config.M6_SELF_MONITOR_COOLDOWN
+            )
+            self._self_monitor_hits[(device_id, int(port))] = 0
+        return event
+
+    def iniciar_self_monitor(self):
+        if not Config.M6_SELF_MONITOR_ENABLED:
+            return {"ok": True, "enabled": False, "status": "disabled"}
+        if self._self_monitor_thread and self._self_monitor_thread.is_alive():
+            return {"ok": True, "enabled": True, "status": "already_running"}
+        self._self_monitor_stop.clear()
+        self._self_monitor_thread = threading.Thread(
+            target=self._self_monitor_loop,
+            name="m6-self-monitor",
+            daemon=True,
+        )
+        self._self_monitor_thread.start()
+        return {"ok": True, "enabled": True, "status": "started"}
+
+    def detener_self_monitor(self):
+        self._self_monitor_stop.set()
+        return {"ok": True, "status": "stopping"}
+
+    def _self_monitor_loop(self):
+        while not self._self_monitor_stop.is_set():
+            try:
+                self.self_monitor_run_once(reason="scheduled")
+            except Exception as exc:
+                print(f"[M6][SELF-MONITOR] Error: {exc}")
+            wait_time = max(Config.M6_SELF_MONITOR_INTERVAL, 1)
+            self._self_monitor_stop.wait(wait_time)
+
+    def self_monitor_status(self):
+        with self._lock:
+            last_samples = list(self._self_monitor_events)[-5:]
+            cooldown = {
+                f"{dev}:{port}": max(0, int(until - time.time()))
+                for (dev, port), until in self._self_monitor_cooldown.items()
+                if until > time.time()
+            }
+            hits = {
+                f"{dev}:{port}": count
+                for (dev, port), count in self._self_monitor_hits.items()
+                if count
+            }
+        return {
+            "ok": True,
+            "running": bool(
+                self._self_monitor_thread
+                and self._self_monitor_thread.is_alive()
+            ),
+            "config": self._self_monitor_config(),
+            "cooldown": cooldown,
+            "consecutive_hits": hits,
+            "recent_runs": last_samples,
+        }
+
     def _purgar_rate_limits_expirados(self):
         now = datetime.now(timezone.utc)
         expired = []
@@ -4406,8 +4786,16 @@ class M6Translator:
             return existing
 
         target = self._resolver_rate_limit_target(device_id, port)
-        ttl = Config.RATE_LIMIT_DEFAULT_TTL
-        rate_pps = Config.RATE_LIMIT_DEFAULT_PPS
+        ttl = int(
+            alerta.get("ttl_seconds")
+            or alerta.get("ttl_segundos")
+            or Config.RATE_LIMIT_DEFAULT_TTL
+        )
+        rate_pps = int(
+            alerta.get("meter_rate")
+            or alerta.get("rate_pps")
+            or Config.RATE_LIMIT_DEFAULT_PPS
+        )
         meter_id = self.onos.crear_meter_rate_limit(device_id, rate_pps=rate_pps)
         if not meter_id:
             return {
@@ -5195,6 +5583,36 @@ def endpoint_security_rate_limits():
     }), 200
 
 
+@app.route("/m6/self-monitor/status", methods=["GET"])
+def endpoint_self_monitor_status():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    return jsonify(m6.self_monitor_status()), 200
+
+
+@app.route("/m6/self-monitor/run-once", methods=["POST"])
+def endpoint_self_monitor_run_once():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    reason = (request.json or {}).get("reason") or "manual"
+    result = m6.self_monitor_run_once(reason=reason)
+    return jsonify(result), 200 if result.get("ok") else 400
+
+
+@app.route("/m6/self-monitor/start", methods=["POST"])
+def endpoint_self_monitor_start():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    return jsonify(m6.iniciar_self_monitor()), 200
+
+
+@app.route("/m6/self-monitor/stop", methods=["POST"])
+def endpoint_self_monitor_stop():
+    if not _security_token_valido():
+        return jsonify({"error": "security token inválido"}), 401
+    return jsonify(m6.detener_self_monitor()), 200
+
+
 @app.route("/m6/security/host-state", methods=["GET"])
 def endpoint_host_state():
     if not _security_token_valido():
@@ -5355,13 +5773,11 @@ def endpoint_m6_dashboard():
         <select id="failoverDevice">
           <option value="of:0000e2ecb0ea0445">Simular caída SW2</option>
           <option value="of:0000eadb63449748">Simular caída SW3</option>
-          <option value="of:00007e3892af7141">Simular caída SW1</option>
-          <option value="of:00006a0757adfc4e">Simular caída SW4</option>
-          <option value="of:0000ca126249d546">Simular caída SW5</option>
         </select>
-        <button id="runFailover" class="primary">Analizar</button>
-        <button id="planFailoverRecovery">Plan recovery</button>
+        <button id="runFailover" class="primary">Analizar impacto (dry-run)</button>
+        <button id="planFailoverRecovery">Ver plan recovery (dry-run)</button>
       </div>
+      <p class="muted">Estos botones no tumban switches ni instalan flows. Solo calculan impacto y plan teorico. Demo segura: solo SW2/SW3. SW1, SW4 y SW5 son vitales.</p>
       <div class="grid" id="failoverGrid"></div>
       <div class="table-wrap"><table><thead><tr><th>Sesión</th><th>Host</th><th>Estado</th><th>Permisos afectados</th><th>Ruta alternativa</th></tr></thead><tbody id="failoverRows"></tbody></table></div>
       <div class="panel" style="margin-top:12px"><pre id="failoverRaw"></pre></div>
@@ -5617,7 +6033,7 @@ async function runFailover() {
     });
     state.data.failover = data;
     renderFailover(data);
-    setStatus('Failover dry-run OK para ' + swLabel(device));
+    setStatus('Analisis dry-run OK para ' + swLabel(device) + '. No se bajaron puertos ni se modificaron flows.');
   } catch (e) {
     setStatus('Error failover: ' + e.message);
   }
@@ -5631,7 +6047,7 @@ async function planFailoverRecovery() {
     });
     state.data.failover = data;
     renderFailoverRecovery(data);
-    setStatus('Plan de recovery generado sin instalar ni borrar flows.');
+    setStatus('Plan de recovery dry-run generado. No se instalaron ni borraron flows.');
   } catch (e) {
     setStatus('Error recovery: ' + e.message);
   }
@@ -5644,7 +6060,7 @@ function renderFailoverTopology(d) {
     metric('Hosts ONOS', d.hosts_count || 0),
     metric('Auto reinstall', d.failover_auto_reinstall_enabled ? 'ON' : 'OFF', d.failover_auto_reinstall_enabled ? 'warn' : 'ok')
   ].join('');
-  document.getElementById('failoverRows').innerHTML = '<tr><td colspan="5" class="muted">Elige un switch y presiona Analizar. No se instalaran ni borraran flows.</td></tr>';
+  document.getElementById('failoverRows').innerHTML = '<tr><td colspan="5" class="muted">Elige SW2 o SW3 y presiona Analizar impacto. Es simulacion: no se instalaran ni borraran flows.</td></tr>';
   document.getElementById('failoverRaw').textContent = JSON.stringify(d, null, 2);
 }
 function renderFailoverRecovery(d) {
@@ -5996,6 +6412,17 @@ def endpoint_status():
         "rate_limits_active": rate_limits_active,
         "rate_limit_default_pps": Config.RATE_LIMIT_DEFAULT_PPS,
         "rate_limit_default_ttl": Config.RATE_LIMIT_DEFAULT_TTL,
+        "self_monitor": {
+            "enabled": Config.M6_SELF_MONITOR_ENABLED,
+            "actions_enabled": Config.M6_SELF_MONITOR_ACTIONS,
+            "running": bool(
+                m6._self_monitor_thread
+                and m6._self_monitor_thread.is_alive()
+            ),
+            "threshold_pps": Config.M6_SELF_MONITOR_THRESHOLD_PPS,
+            "meter_pps": Config.M6_SELF_MONITOR_METER_PPS,
+            "ttl_seconds": Config.M6_SELF_MONITOR_TTL,
+        },
         "network_actions_enabled": Config.NETWORK_ACTIONS_ENABLED,
         "onos_writes_enabled": Config.ONOS_WRITES_ENABLED,
         "onos_reads_enabled": Config.ONOS_READS_ENABLED,
@@ -6034,6 +6461,7 @@ if __name__ == "__main__":
         print(f"[M6] session_cleanup={m6.cleanup_session_gates_huerfanos()}")
 
     m6.iniciar_sincronizador_portal()
+    print(f"[M6] self_monitor={m6.iniciar_self_monitor()}")
 
     print(f"[M6] API escuchando en {Config.M6_HOST}:{Config.M6_PORT}\n")
     app.run(host=Config.M6_HOST, port=Config.M6_PORT,
