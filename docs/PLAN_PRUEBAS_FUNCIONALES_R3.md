@@ -58,9 +58,10 @@ Tiempo total cadena: ~3–6 segundos desde el primer paquete del ataque
 **Procedimiento** (desde H1):
 ```bash
 # Ataque (versión corta — activa la firma igualmente)
-curl -v --max-time 10 \
-  "http://192.168.100.101:8001/?class.module.classLoader.resources.context.parent.pipeline.first.fileDateFormat=.jsp" \
-  -w '\nHTTP=%{http_code}\n'
+curl -s -X POST http://192.168.100.101:8001/ \
+ -H 'Content-Type: application/x-www-form-urlencoded' \
+ -d 'class.module.classLoader.resources.context.parent.pipeline.first.pattern=RCE' \
+ -w '\nHTTP=%{http_code}\n'
 
 # Verificar bloqueo ~10 s después
 curl -s --max-time 5 -o /dev/null -w 'bloqueado=%{http_code}\n' http://192.168.100.101:8001/
@@ -144,9 +145,7 @@ curl -s --max-time 5 -o /dev/null -w 'bloqueado=%{http_code}\n' http://192.168.1
 
 **Procedimiento** (desde H1):
 ```bash
-curl -v --max-time 10 \
-  "http://192.168.100.101:8001/?id=1'+OR+'1'%3D'1" \
-  -w '\nHTTP=%{http_code}\n'
+curl --path-as-is -m 8 'http://192.168.100.101:8001/?id=2%27%20OR%20%272%27=%272'
 
 curl -s --max-time 5 -o /dev/null -w 'bloqueado=%{http_code}\n' http://192.168.100.101:8001/
 ```
@@ -163,9 +162,7 @@ curl -s --max-time 5 -o /dev/null -w 'bloqueado=%{http_code}\n' http://192.168.1
 
 **Procedimiento** (desde H1):
 ```bash
-curl -v --max-time 10 \
-  "http://192.168.100.101:8001/%2e%2e%2f%2e%2e%2fetc%2fpasswd" \
-  -w '\nHTTP=%{http_code}\n'
+curl --path-as-is -m 8 'http://192.168.100.101:8001/../../etc/passwd'
 
 curl -s --max-time 5 -o /dev/null -w 'bloqueado=%{http_code}\n' http://192.168.100.101:8001/
 ```
